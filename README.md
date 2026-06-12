@@ -111,11 +111,26 @@ The converged value lands slightly above the Euler-Bernoulli line because beam t
 
 ### Convergence study
 
-Because beam theory is not the exact 2D answer, convergence is shown two ways: a **plateau** view (deflection converging to the true 2D value, passing the Euler-Bernoulli reference) and a **self-convergence** view (error measured against the finest mesh, recovering a ~1.82 log-log slope -- near the theoretical second-order rate for CST displacement).
+Unlike Phase 1, there is no exact answer to validate against, because Euler-Bernoulli is an idealization, not the true 2D solution. So we use two complementary views to show convergence.
+
+**Plateau view:** This plots tip deflection against mesh refinement. The deflection climbs from ~0.28 (coarsest mesh, heavily shear-locked) to ~0.512 (converged), rising through and just past the Euler-Bernoulli reference of 0.500. That rise-and-cross shape is precisely the shear-locking-then-shear-deformation story: a coarse mesh is artificially stiff, refinement relieves the locking, and the converged value settles slightly above beam theory because 2D elasticity captures shear deformation that Euler-Bernoulli ignores.
+
+| Mesh (nx×ny) | Elements | Tip deflection |
+|:---:|:---:|:---:|
+| 10×2 | 40 | 0.280 |
+| 20×4 | 160 | 0.423 |
+| 40×8 | 640 | 0.487 |
+| 80×16 | 2560 | 0.507 |
+| 160×32 | 10240 | 0.512 |
+
+Euler-Bernoulli reference: **0.500**
+
+**Self-convergence view:** With no analytical truth available, the finest mesh is used as a stand-in reference, and the error of each coarser mesh is measured against it. On a log-log plot the error falls along a clean line, running roughly parallel to the slope-2 reference — a touch steeper, measured at 1.82. It isn't exactly 2.00 because the finest mesh is itself still slightly converging, so it's an imperfect reference, and that contamination pulls the slope down a little. Even so, it confirms the second-order-ish convergence expected for CST displacement.
+
+**Together:** the plateau confirms *what* the solver converges to (the physics), and the self-convergence confirms *how fast* (the numerics). Together they validate the solver without an exact answer — the kind of verification you'd use on any real part where no closed-form solution exists.
 
 ![Plateau convergence](phase2-2d-elasticity/convergence_plateau.png)
 ![Self-convergence](phase2-2d-elasticity/convergence_selfconv.png)
-
 ### Running Phase 2
 
 ```bash
