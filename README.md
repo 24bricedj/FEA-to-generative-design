@@ -29,7 +29,7 @@ This project is built on three principles:
 | Phase | Topic | Status |
 |:-----:|:------|:------:|
 | 1 | 1D linear FEA (bar) | Complete |
-| 2 | 2D linear elastic FEA | Planned |
+| 2 | 2D linear elastic FEA (CST) | Complete |
 | 3 | Sensitivity analysis (adjoint method) | Planned |
 | 4 | SIMP topology optimization | Planned |
 | 5 | Manufacturing-constrained generative design | Planned |
@@ -44,9 +44,9 @@ A complete linear finite element solver for the 1D bar, built entirely from firs
 ### What it does
 
 Solves the governing equation for axial deformation of a bar:
-'''
+```
 d/dx(EA * du/dx) + b(x) = 0,    u(0) = 0,    EA * du/dx|_{x=L} = P
-'''
+```
 
 The pipeline: build mesh -> element stiffness matrices -> global assembly -> consistent load vector -> apply boundary conditions -> solve `Ku = F` -> post-process.
 
@@ -75,6 +75,53 @@ A mesh-refinement study confirms the method converges at the theoretically predi
 cd phase1-1d-bar
 python run_example.py     # solve the example problem and validate against analytical
 python convergence.py     # run the mesh convergence study
+```
+
+---
+
+## Phase 2: 2D Linear Elastic FEA (Constant-Strain Triangle)
+
+A from-scratch 2D plane-stress finite element solver using constant-strain triangle (CST) elements. Generalizes the Phase 1 bar solver from a scalar 1-DOF-per-node problem to a vector 2-DOF-per-node elasticity problem.
+
+### What it does
+
+Solves 2D linear elasticity under plane-stress assumptions on a triangulated domain. The element stiffness is the standard
+```
+k = Bᵀ D B · t · A
+```
+where B is the 3×6 strain-displacement matrix (built from the CST shape-function gradients), D is the 3×3 plane-stress constitutive matrix, t is thickness, and A is the triangle area. The pipeline mirrors Phase 1: mesh -> element stiffness -> global assembly (2 DOFs/node) -> load vector -> boundary conditions -> solve -> post-process.
+
+### Implemented from scratch
+
+- **Plane-stress constitutive matrix D** -- relating the three stresses to the three strains, including Poisson coupling.
+- **CST element stiffness** -- derived from the linear shape functions over a triangle; validated against four physical properties (symmetry, rank-3 deficiency for the three rigid-body modes, zero-energy rigid translation, positive semi-definiteness).
+- **Global assembly** -- 2-DOF-per-node scatter via a connectivity table, generalizing the Phase 1 assembly. Validated by confirming the assembled global matrix retains exactly 3 rigid-body modes.
+- **Boundary conditions and loads** -- DOF-level Dirichlet constraints (allowing per-direction fixing) and distributed edge loads.
+
+### Validation: cantilever benchmark
+
+The solver is tested on a clamped cantilever (length = 5× depth) under a distributed tip load, compared against Euler-Bernoulli beam theory (δ = PL³/3EI).
+
+![Deformed cantilever](phase2-2d-elasticity/deformed.png)
+
+Constant strain cannot represent the linear bending-strain gradient through the depth of the beam, so when the element bends, it is forced to develop a spurious shear strain that shouldn't be there. That fake shear soaks up energy, and absorbing energy is what makes the element artificially stiff. The result is a coarse mesh that under-predicts deflection — it reports the beam as stiffer than it really is.
+Refinement fixes this. A staircase of many small constant-strain triangles, each holding a slightly different constant value, approximates the smooth linear gradient — and the finer the mesh, the finer the staircase, so less spurious shear is generated and the deflection climbs toward the true value.
+The converged value lands slightly above the Euler-Bernoulli line because beam theory assumes cross-sections stay perpendicular to the beam axis and ignores shear deformation entirely. Our 2D elasticity model includes it, which makes the true beam slightly more flexible. So the converged FEA settling a few percent above the beam-theory reference isn't error — it's real physics that beam theory leaves out.
+
+
+### Convergence study
+
+Because beam theory is not the exact 2D answer, convergence is shown two ways: a **plateau** view (deflection converging to the true 2D value, passing the Euler-Bernoulli reference) and a **self-convergence** view (error measured against the finest mesh, recovering a ~1.82 log-log slope -- near the theoretical second-order rate for CST displacement).
+
+![Plateau convergence](phase2-2d-elasticity/convergence_plateau.png)
+![Self-convergence](phase2-2d-elasticity/convergence_selfconv.png)
+
+### Running Phase 2
+
+```bash
+cd phase2-2d-elasticity
+python run_example.py     # solve the cantilever, save deformed mesh
+python convergence.py     # plateau + self-convergence study
 ```
 
 ---
