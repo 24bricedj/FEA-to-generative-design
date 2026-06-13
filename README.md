@@ -24,16 +24,27 @@ This project is built on three principles:
 
 ---
 
+## Capstone Target
+
+The project builds toward a concrete deliverable: a **topology-optimized, internally-cooled, additively-manufactured piston** for a high-output engine. This part unifies every layer of the stack — structural loading (combustion gas pressure and reciprocating inertia), thermal loading (combustion heat flux and internal oil-cooling galleries), and a geometry that can only be produced by additive manufacturing. It's the reason the roadmap includes a from-scratch thermal solver: a piston is a coupled thermal-structural problem, and optimizing one honestly requires capturing both fields.
+
+The broader thesis is unchanged — build every layer from first principles to understand what commercial generative-design and AM tools do internally — with the application target sharpened toward propulsion and powertrain performance.
+
+---
+
+## Roadmap
+
 ## Roadmap
 
 | Phase | Topic | Status |
 |:-----:|:------|:------:|
 | 1 | 1D linear FEA (bar) | Complete |
 | 2 | 2D linear elastic FEA (CST) | Complete |
-| 3 | Sensitivity analysis (adjoint method) | Planned |
-| 4 | SIMP topology optimization | Planned |
-| 5 | Manufacturing-constrained generative design | Planned |
-| 6 | ML acceleration (neural reparameterization / PINN surrogates) | Planned |
+| 3 | Thermal FEA (1D → 2D conduction → thermal-structural coupling) | Planned |
+| 4 | Sensitivity analysis (adjoint method) | Planned |
+| 5 | SIMP topology optimization | Planned |
+| 6 | Manufacturing-constrained generative design (AM overhang, feature size) | Planned |
+| 7 | ML acceleration (neural reparameterization / PINN surrogates) | Planned |
 
 ---
 
