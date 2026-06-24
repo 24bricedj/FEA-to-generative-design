@@ -40,7 +40,7 @@ The broader thesis is unchanged — build every layer from first principles to u
 |:-----:|:------|:------:|
 | 1 | 1D linear FEA (bar) | Complete |
 | 2 | 2D linear elastic FEA (CST) | Complete |
-| 3 | Thermal FEA (1D → 2D conduction → thermal-structural coupling) | Planned |
+| 3 | Thermal FEA (1D → 2D conduction → thermal-structural coupling) | Complete |
 | 4 | Sensitivity analysis (adjoint method) | Planned |
 | 5 | SIMP topology optimization | Planned |
 | 6 | Manufacturing-constrained generative design (AM overhang, feature size) | Planned |
@@ -150,11 +150,84 @@ python run_example.py     # solve the cantilever, save deformed mesh
 python convergence.py     # plateau + self-convergence study
 ```
 
+
+---
+
+## Phase 3: Thermal FEA & Thermal-Structural Coupling
+
+A from-scratch steady-state heat-conduction solver -- 1D, then 2D on the CST mesh -- culminating in **thermal-structural coupling**: joining the thermal and elasticity solvers so a temperature field produces real thermal stress and deformation. This is the multiphysics capability the piston capstone is built on.
+
+### The core insight: thermal conduction ≡ elasticity
+
+1D steady-state heat conduction is a direct isomorphism with the Phase 1 elasticity bar. Starting from the same weak form, you simply substitute each elasticity quantity for its thermal counterpart -- displacement → temperature, Young's modulus → conductivity, body load → heat source, internal force → heat flow rate (Fourier's law) -- and the derivation follows the identical path. The problem becomes almost exactly the one already solved in Phase 1, so the existing solver *became* the 1D thermal solver by recognizing the structure rather than rewriting it. With constant coefficients and no spatial variation in the weak-form terms, the derivation stays simple.
+
+The one genuinely new piece versus Phase 1 is **nonzero Dirichlet BCs**. Phase 1 only ever fixed values to zero, where the constrained term contributes nothing and drops out of the system. Here, a prescribed nonzero end temperature *does* contribute: its known value, scaled by the coupling stiffness, injects a load into every neighboring equation (`F_i -= K_ij · T_j`) before the fixed row and column are eliminated. Phase 1 is the special case of this where the prescribed value is zero, so the injected load vanishes.
+
+### Step 1: 1D heat conduction
+
+Solves steady-state conduction in a bar:
+```
+d/dx(kA dT/dx) + Q = 0
+```
+
+- **Element conductivity matrix** -- `(kA/h)[[1,-1],[-1,1]]`, the Phase 1 stiffness matrix under the isomorphism (E → k).
+- **Nonzero Dirichlet BCs** -- the one genuinely new piece vs. Phase 1, derived by hand and validated.
+- **Validation** -- against two hand-derived analytical profiles: a linear profile (no source) and a quadratic profile (uniform source), both matching to machine precision (~1e-15) at the nodes. Convergence confirmed at **O(h²)**, slope 2.00.
+
+![1D thermal: source-driven quadratic profile](phase3-thermal/1d-conduction/profile_caseB.png)
+
+### Step 2: 2D heat conduction (CST)
+
+Generalizes to 2D on the same triangular mesh as Phase 2. Because temperature is a **scalar** (1 DOF/node) where displacement was a vector (2 DOF/node), the element is simpler than Phase 2: a **3×3** conductivity matrix built from a **2×3** temperature-gradient matrix, with scalar conductivity replacing the 3×3 constitutive matrix.
+
+```
+k_e = Bᵀ B · k · A,    B = (1/2A) [[b1,b2,b3],[c1,c2,c3]]
+```
+
+- **Insulated boundaries for free** -- a zero-flux edge is a natural (Neumann) BC that falls out of the weak form automatically. Insulated edges require *no code*: doing nothing to a boundary enforces zero heat flux through it.
+- **Validation** -- a linear-profile benchmark (insulated top/bottom, fixed sides) matches to machine precision, confirming the insulated-edge behavior. A curved **sinusoidal-edge benchmark** (exact sin·sinh solution) gives **O(h²)** convergence, slope 1.975.
+
+![2D temperature field](phase3-thermal/2d-conduction/temperature_field.png)
+
+### Step 3: Thermal-structural coupling
+
+A heated material wants to expand, which creates thermal strain. If the material is free, it expands as much as it wants and develops no stress. But if it is constrained -- physically pinned, bolted, or held back by cooler neighboring material -- that frustrated expansion produces stress. The same holds in reverse for thermal contraction under cooling. The key is that total strain splits into a mechanical part and a thermal part, and only the mechanical part -- the gap between what the material actually does and what it freely wanted to do -- produces stress: σ = D(ε_total − ε_thermal).
+
+The bridge between the solvers is that this thermal strain enters the elasticity system as an equivalent load: Ku = F_ext + F_thermal. The temperature field computed by the thermal solver becomes a force driving the structural solver. This is exactly what the piston capstone needs -- a part that heats unevenly, is constrained, and so develops thermal stress on top of the mechanical stress from gas pressure and inertia. In a mission-critical part like a piston, both must be accounted for; thermal stress alone can cause failure.
+
+The coupling is validated against a closed-form case -- a fully-constrained uniformly-heated block, whose exact thermal stress is `σ = -EαΔT/(1-ν)` -- matching to machine precision.
+
+The demo below shows the pure thermal effect isolated: a cantilever with a hot-bottom/cool-top gradient and **no mechanical load** curls upward like a bimetallic strip, driven entirely by differential thermal expansion. (Shown at true scale -- thermal deformation is a large, real effect.)
+
+![Thermal curling under a gradient](phase3-thermal/coupling/thermal_curl.png)
+
+### Running Phase 3
+
+```bash
+cd phase3-thermal/1d-conduction
+python run_example.py     # 1D validation (linear + quadratic profiles)
+python convergence.py     # O(h²) convergence
+
+cd ../2d-conduction
+python run_example.py     # 2D sinusoidal benchmark + temperature field
+python convergence.py     # O(h²) convergence
+
+cd ../coupling
+python run_example.py            # constrained-block thermal stress (validation)
+python thermal_curl_demo.py      # thermal curling visualization
+```
+
 ---
 
 ## Tech Stack
 
 - **Python 3.11**
+- **NumPy** -- array math, linear algebra
+- **Matplotlib** -- visualization
+
+(Later phases will add SciPy, PyTorch, and optimization libraries.)
+
+---
 - **NumPy** -- array math, linear algebra
 - **Matplotlib** -- visualization
 
