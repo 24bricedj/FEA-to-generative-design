@@ -32,7 +32,6 @@ The broader thesis is unchanged — build every layer from first principles to u
 
 ---
 
-## Roadmap
 
 ## Roadmap
 
