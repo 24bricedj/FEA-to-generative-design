@@ -40,8 +40,8 @@ The broader thesis is unchanged — build every layer from first principles to u
 | 1 | 1D linear FEA (bar) | Complete |
 | 2 | 2D linear elastic FEA (CST) | Complete |
 | 3 | Thermal FEA (1D → 2D conduction → thermal-structural coupling) | Complete |
-| 4 | Sensitivity analysis (adjoint method) | Planned |
-| 5 | SIMP topology optimization | Planned |
+| 4 | Sensitivity analysis (adjoint method) | Complete |
+| 5 | SIMP topology optimization | Complete |
 | 6 | Manufacturing-constrained generative design (AM overhang, feature size) | Planned |
 | 7 | ML acceleration (neural reparameterization / PINN surrogates) | Planned |
 
@@ -274,6 +274,105 @@ This is the map topology optimization follows -- keep material where the field i
 cd phase4-sensitivity
 python sensitivity.py       # adjoint gradient vs finite differences
 python plot_sensitivity.py  # sensitivity field visualization
+```
+---
+
+## Phase 5: SIMP Topology Optimization
+
+The payoff of the whole stack. Everything before this **analyzes or differentiates** a design; this phase **invents** one. Given a design domain, loads, supports, and a material budget, the optimizer decides where material should go to make the stiffest possible structure. This is generative design, built from first principles on the solvers and sensitivities of Phases 1-4.
+
+### The problem
+
+```
+minimize    c(ρ)                    compliance (= maximize stiffness)
+subject to  Σ ρᵢVᵢ = V*             material budget
+            0 ≤ ρᵢ ≤ 1              densities stay physical
+```
+
+Each element gets a design variable ρᵢ (1 = solid, 0 = void). Thousands of them, driven by the adjoint gradient from Phase 4.
+
+### Why intermediate densities must be penalized
+
+If we let the densities be continuous, we get gradient solvability, but the optimizer then settles on intermediate densities, which are physically meaningless — you cannot have half material. The fix comes from the fact that cost scales linearly with density, while stiffness scales as ρᵖ. That divergence is the penalization.
+
+The two-element experiment shows it directly. Fix a budget of one unit and compare gray (ρ₁ = ρ₂ = 0.5) against solid-plus-void (ρ₁ = 1, ρ₂ = 0). At p = 1 both give a total stiffness of 1 — tied, so there is no reason for the optimizer to avoid gray. At p = 3, gray gives 0.25 and solid-plus-void gives 1, so solid-plus-void is four times stiffer for the same material budget.
+
+The mechanism is that raising a fraction to a power shrinks it disproportionately. A half-dense element costs half the budget but delivers only one eighth of the stiffness. Gray material is overpriced, so the optimizer abandons it.
+
+### Why p = 3
+
+A larger p penalizes harder, so why not use p = 50? Because the optimizer steers by gradients. At p = 50, 0.5⁵⁰ is an vanishingly small number and even 0.9⁵⁰ is only about 0.005. The curve is flat and pinned near zero across almost the entire range, then rises in a near-vertical cliff at ρ ≈ 1.
+
+In the flat region the slope is essentially zero, so there is no gradient signal and the optimizer is stuck in the dark — it cannot tell which way to move an element. At the cliff the slope is nearly infinite, which is unstable and produces oscillating steps.
+
+p = 3 is the compromise: strong enough penalization to kill gray material, and a smooth enough curve to keep the gradient informative everywhere.
+
+### The sensitivity
+
+Extending the Phase 4 adjoint result to the penalized stiffness model `K = Σ ρᵢᵖ Kᵢ⁽⁰⁾`:
+
+```
+dK/dρⱼ = p ρⱼᵖ⁻¹ Kⱼ⁽⁰⁾        →        dc/dρⱼ = -p ρⱼᵖ⁻¹ uⱼᵀ Kⱼ⁽⁰⁾ uⱼ
+```
+
+Setting p = 1 recovers the Phase 4 sensitivity exactly. The extra factor `p ρⱼᵖ⁻¹` scales the gradient up for already-dense elements and down for sparse ones -- the penalization is baked into the signal the optimizer steers by, not just the physics.
+
+### The optimality criteria update
+
+The gradient alone would drive every element to a density of 1, because adding material always helps. The material budget is what makes it a design problem: given limited material, where does it help most?
+
+Differentiating the Lagrangian L = c(ρ) + λ(Σ ρᵢVᵢ − V*) and setting it to zero gives (1/Vⱼ)(∂c/∂ρⱼ) = −λ, with the same λ for every element. Since the right side carries no element index, every element is driven to the same benefit per unit material.
+
+The intuition: if element A produces more stiffness per unit material than element B, you can move material from B to A and gain stiffness for free — so you were not at the optimum. Unequal benefit always leaves a profitable shuffle on the table. Only when all elements are equal does it stop. It is water finding its level.
+
+The update uses a deal ratio Bⱼ that measures how good a deal each element is: ρⱼ(new) = ρⱼ · Bⱼ. Bargains (B > 1) grow, duds (B < 1) shrink, and elements at balance (B = 1) hold. λ is not known in advance; it is found each iteration by binary search, since total volume decreases monotonically with λ. Two guardrails keep it stable: a move limit of 0.2, which caps how far a density can shift per step, and clamping ρ between 0.001 and 1 — the small floor keeps the stiffness matrix invertible.
+
+### Filtering: checkerboards and mesh independence
+
+Raw SIMP produces checkerboard patterns of alternating solid and void elements. These are artifacts: the FEA formulation over-estimates the stiffness of that pattern, so the optimizer is exploiting a discretization bug rather than finding real structure.
+
+The cause is that each element's sensitivity is purely local — it depends only on that element's own displacement and stiffness. Nothing makes an element consistent with its neighbors, so wild element-to-element alternation is possible.
+
+The fix is to average the sensitivities over a neighborhood of radius rmin. In a checkerboard, neighbors have opposite values, so averaging washes the pattern out. In a real strut, neighbors agree, and the feature passes through the filter intact. Agreement survives smoothing; alternation does not.
+
+The bonus is that rmin imposes a physical length scale, so the minimum feature size is set by a chosen parameter rather than by the mesh. Refining the mesh with rmin scaled accordingly converges to the same design instead of inventing ever-finer members. This also connects directly to Phase 6: "no features thinner than rmin" is essentially a manufacturing constraint — minimum printable wall thickness.
+
+### Results: MBB beam benchmark
+
+The MBB beam is the standard topology-optimization benchmark: a simply-supported beam with a central load, modelled as a half-domain with a symmetry plane. Starting from a uniform 50% density field on a 180×60 mesh:
+
+| | Compliance |
+|:---|:---:|
+| Initial (uniform gray) | 1038.1 |
+| Converged (iteration 95) | 208.6 |
+
+**A 5× stiffness improvement using exactly the same amount of material** -- the volume constraint held at 0.500 for every iteration, so the gain comes entirely from redistribution, not addition.
+
+![MBB beam density field](phase5-simp/mbb_full_180.png)
+
+The optimizer rediscovers structural engineering unprompted: a compression chord along the top under the load, a tension chord along the bottom spanning to the supports, and triangulated diagonal web members between them. Nothing in the code knows what a truss is.
+
+### Stress verification
+
+Thresholding the density field to solid/void and re-solving gives the stress in the structure that would actually be manufactured (intermediate densities are a mathematical device, not a real material, so stress is only meaningful once the shape is committed).
+
+![MBB von Mises stress](phase5-simp/mbb_stress.png)
+
+Two honest caveats:
+
+- **The 1337 MPa peak is a point-load singularity**, not a real stress. Applying the entire load at a single node produces a theoretically infinite stress that gets *worse* with refinement. The colour scale is capped at the 98th percentile (319 MPa) so the structure remains readable; the median stress of 164 MPa is representative.
+- **Thresholding changed compliance by -8.7%** (208.6 → 190.4). The thresholded structure is stiffer, because borderline elements snap to fully solid. This is an honest measure of how much the residual gray zones were contributing.
+
+### Mesh independence in practice
+
+Running the same problem at 60×20 with rmin = 1.5 and at 180×60 with rmin = 4.5 (the filter radius scaled with the mesh) converges to the same physical design -- c = 203.3 and c = 208.6 respectively -- rather than the finer mesh inventing thinner members. This is the mesh-independence the filter was derived to guarantee, confirmed empirically.
+
+### Running Phase 5
+
+```bash
+cd phase5-simp
+python optimize.py        # 60x20 MBB beam, fast
+python optimize_fine.py   # 180x60 + von Mises stress (~40 s)
 ```
 
 ## Tech Stack
