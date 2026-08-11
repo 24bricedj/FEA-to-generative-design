@@ -218,6 +218,64 @@ python thermal_curl_demo.py      # thermal curling visualization
 
 ---
 
+
+## Phase 4: Sensitivity Analysis (Adjoint Method)
+
+The turning point of the project: everything before this **analyzes** a design. Sensitivity analysis is what lets an optimizer **change** one. It answers "if I nudge this design variable, how much does my objective change?" -- the gradient that topology optimization steers by.
+
+### The problem: why the obvious approach fails
+
+The direct method derives the sensitivity by differentiating the FEA system, giving du/dρ = -K⁻¹(dK/dρ)u, which costs an entire linear solve per design variable. If the part contains 10,000 elements, that is 10,000 solves per optimization step -- far too many, too time consuming, and downright intractable.
+
+The thing is, we don't need du/dρ for each element. We don't need a whole displacement field per variable; we only need dc/dρ, one scalar per variable. The direct method does an enormous amount of unnecessary work, computing a full field only to crush it down to a single number at the end.
+
+The trick is that matrix multiplication is associative. In the expression -Fᵀ K⁻¹ (dK/dρ) u, we regroup and take the left chunk (Fᵀ K⁻¹) instead of the right. That chunk has no ρ in it at all, so it can be computed once and reused for every design variable. This gives a tremendous computational payoff: the entire gradient -- all 10,000 sensitivities -- costs one extra solve instead of 10,000.
+
+
+### The derivation
+
+Differentiating the FEA system (with fixed loads, so dF/drho = 0):
+```
+dK/drho · u + K · du/drho = 0
+```
+
+Defining the adjoint vector λ from the reusable left chunk gives the **adjoint equation**:
+```
+Kᵀ λ = F
+```
+
+Because the FEA stiffness matrix is **symmetric**, this reduces to `Kλ = F` -- identical to the analysis solve `Ku = F`. So for the compliance objective, **λ = u**: the problem is *self-adjoint*, and the adjoint solution is already in hand from the analysis. The sensitivity costs *zero* extra solves.
+
+With the SIMP-style stiffness model `K = Σ ρᵢ Kᵢ⁽⁰⁾`, the sensitivity collapses to a strikingly simple form:
+
+```
+dc/dρⱼ = -uⱼᵀ Kⱼ⁽⁰⁾ uⱼ
+```
+
+which is (twice the negative of) the **strain energy stored in element j**. Physically: the elements storing the most strain energy are where adding material helps stiffness most. That ranking is the signal topology optimization follows.
+
+### Validation against finite differences
+
+The analytical gradient is checked element-by-element against a brute-force finite-difference gradient (nudge each density by ε, re-solve, measure the actual change in compliance). On a 16-element cantilever with randomized densities, all elements agree to a **maximum relative error of 3.15e-06**.
+
+That residual is *not* error in the analytical gradient -- it is the finite-difference approximation's own truncation error, which is of order ε (here ε = 1e-6). The adjoint result is the more accurate of the two; the brute-force check is the rougher reference.
+
+### The sensitivity field
+
+Plotting |dc/dρ| across a solid cantilever reveals the **load path**: sensitivity concentrates near the clamped edge (top and bottom fibers, which carry the bending stress) and at the load point, and falls to near zero through the lightly-loaded interior.
+
+![Compliance sensitivity field](phase4-sensitivity/sensitivity_field.png)
+
+This is the map topology optimization follows -- keep material where the field is bright, remove it where it is dark.
+
+### Running Phase 4
+
+```bash
+cd phase4-sensitivity
+python sensitivity.py       # adjoint gradient vs finite differences
+python plot_sensitivity.py  # sensitivity field visualization
+```
+
 ## Tech Stack
 
 - **Python 3.11**
