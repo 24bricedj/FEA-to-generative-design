@@ -123,6 +123,7 @@ def main():
         ax.set_title(t); ax.set_xticks([]); ax.set_yticks([])
     fig.colorbar(im, ax=axes, fraction=0.02, label="density ρ")
     fig.savefig("am_comparison.png", dpi=160, bbox_inches="tight")
+    np.save("r0.npy", r0); np.save("r1.npy", r1)
 
 
 if __name__ == "__main__":
