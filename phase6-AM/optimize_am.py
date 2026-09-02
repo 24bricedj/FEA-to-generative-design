@@ -114,15 +114,15 @@ def main():
     print(f"overhang violations: {v0}/{n0} solid  ->  {v1}/{n1} solid")
     print(f"greyness: {greyness(r0):.3f} -> {greyness(r1):.3f}")
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 5.4))
+    fig, axes = plt.subplots(2, 1, figsize=(14, 5.4))
     for ax, r, t in zip(axes, [r0, r1],
                         [f"Unconstrained SIMP (c = {c0:.1f})",
                          f"AM overhang-constrained, 45° (c = {c1:.1f})"]):
-        im = ax.imshow(r, cmap="jet", vmin=0, vmax=1, interpolation="nearest")
+        full = np.concatenate([np.fliplr(r), r], axis=1)     # mirror to full span
+        im = ax.imshow(full, cmap="jet", vmin=0, vmax=1, interpolation="nearest")
         ax.set_title(t); ax.set_xticks([]); ax.set_yticks([])
     fig.colorbar(im, ax=axes, fraction=0.02, label="density ρ")
     fig.savefig("am_comparison.png", dpi=160, bbox_inches="tight")
-    print("saved am_comparison.png")
 
 
 if __name__ == "__main__":
