@@ -2,9 +2,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from topopt_fast import (element_stiffness_Q4, build_edof, build_filter,
-                         fea_solve, compliance_and_sensitivity, apply_filter,
-                         mbb_boundary_conditions)
+                        fea_solve, compliance_and_sensitivity,
+                        compliance_and_sensitivity_multi, apply_filter,
+                        mbb_boundary_conditions)
 from amfilter import overhang_filter, overhang_backward
+
 
 
 def oc_update(nelx, nely, rho, volfrac, dc, move):
@@ -14,15 +16,41 @@ def oc_update(nelx, nely, rho, volfrac, dc, move):
         lmid = 0.5*(l1 + l2)
         B = np.maximum(-dc/lmid, 1e-12)
         rho_new = np.maximum(0.001,
-                     np.maximum(rho - move,
+                    np.maximum(rho - move,
                         np.minimum(1.0,
-                           np.minimum(rho + move,
-                              rho*np.sqrt(B)))))
+                        np.minimum(rho + move,
+                            rho*np.sqrt(B)))))
         if rho_new.sum() > volfrac*nelx*nely:
             l1 = lmid
         else:
             l2 = lmid
     return rho_new
+
+def mbb_load_cases(nelx, nely):
+    """Two load cases: the primary vertical load at midspan (top-left of the
+    half-model), and a horizontal racking load at mid-height on the right edge."""
+    ndof = 2*(nelx+1)*(nely+1)
+
+    # case 1: vertical at midspan top (node 0, y-DOF)
+    F1 = np.zeros(ndof)
+    F1[1] = -1.0
+
+    # case 2: horizontal at mid-height of the right edge
+    node = (nely+1)*nelx + nely//2        # column nelx, row nely/2
+    F2 = np.zeros(ndof)
+    F2[2*node] = 0.5                      # x-DOF
+
+    return [F1, F2]
+
+def quarter_point_load(nelx, nely):
+    """Single load at half-span of the half-model. Because the left edge is
+    the symmetry plane, the mirrored full beam sees TWO loads at the quarter
+    points."""
+    ndof = 2*(nelx+1)*(nely+1)
+    node = (nely+1)*(nelx//2)          # column nelx/2, row 0 (top edge)
+    F = np.zeros(ndof)
+    F[2*node + 1] = -1.0               # y-DOF, downward
+    return [F]
 
 
 # --- CHANGE 1: module-level helper, sits next to the other functions ---
@@ -40,6 +68,8 @@ def run(use_am, nelx=120, nely=40, volfrac=0.5, penal=3.0, rmin=3.0,
     KE = element_stiffness_Q4()
     edof = build_edof(nelx, nely)
     F, fixed = mbb_boundary_conditions(nelx, nely)
+    load_cases = quarter_point_load(nelx, nely)
+    weights = [1.0]                   # normalize the horizontal case
     H, Hs = build_filter(nelx, nely, rmin)
     rho = volfrac*np.ones((nely, nelx))
     c_hist = []                                # --- CHANGE 3a: track compliance
@@ -54,10 +84,18 @@ def run(use_am, nelx=120, nely=40, volfrac=0.5, penal=3.0, rmin=3.0,
             rho_hat = rho
 
         # --- physics runs on the PRINTABLE density ---
-        u = fea_solve(nelx, nely, rho_hat, penal, KE, edof, fixed, F)
-        c, dc_hat = compliance_and_sensitivity(nelx, nely, rho_hat, penal,
-                                               KE, edof, u)
+        us = [fea_solve(nelx, nely, rho_hat, penal, KE, edof, fixed, Fk)
+            for Fk in load_cases]
+        c, dc_hat = compliance_and_sensitivity_multi(nelx, nely, rho_hat, penal, KE, edof, us, weights)
         dc_hat = apply_filter(H, Hs, rho_hat, dc_hat)
+
+# --- DIAGNOSTIC: how much does each load case contribute? ---
+        if it % 75 == 0:
+            x = rho_hat.flatten(order='F')
+            c_each = [w*np.sum((x**penal) *
+                    np.einsum('ij,jk,ik->i', u[edof], KE, u[edof]))
+                    for u, w in zip(us, weights)]
+            print(f"    per-case compliance: {[f'{v:.1f}' for v in c_each]}")
 
         # --- HOOK 2: chain the gradient back to the design variables ---
         if use_am:
@@ -71,7 +109,7 @@ def run(use_am, nelx=120, nely=40, volfrac=0.5, penal=3.0, rmin=3.0,
 
         if it % 75 == 0:
             print(f"  it {it:3d}  move={move:.2f}  c={c:8.2f}  "
-                  f"vol={rho_hat.mean():.3f}  change={change:.4f}")
+                f"vol={rho_hat.mean():.3f}  change={change:.4f}")
 
         # --- CHANGE 3b: converge on compliance, not max element change ---
         c_hist.append(c)
@@ -117,7 +155,7 @@ def main():
     fig, axes = plt.subplots(2, 1, figsize=(14, 5.4))
     for ax, r, t in zip(axes, [r0, r1],
                         [f"Unconstrained SIMP (c = {c0:.1f})",
-                         f"AM overhang-constrained, 45° (c = {c1:.1f})"]):
+                        f"AM overhang-constrained, 45° (c = {c1:.1f})"]):
         full = np.concatenate([np.fliplr(r), r], axis=1)     # mirror to full span
         im = ax.imshow(full, cmap="jet", vmin=0, vmax=1, interpolation="nearest")
         ax.set_title(t); ax.set_xticks([]); ax.set_yticks([])

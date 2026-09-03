@@ -83,6 +83,33 @@ def compliance_and_sensitivity(nelx, nely, rho, penal, KE, edof, u):
     dc = (-penal*(x**(penal-1))*ce).reshape((nely, nelx), order='F')
     return c, dc
 
+def compliance_and_sensitivity_multi(nelx, nely, rho, penal, KE, edof, us,
+                                     weights=None):
+    """Weighted multi-load-case compliance and sensitivity.
+
+    c = sum_k w_k * c_k,   so   dc/drho_j = -p rho_j^(p-1) * sum_k w_k * (ue_k' KE ue_k)
+
+    The -p rho^(p-1) factor is the same for every load case (they share the
+    same densities), so it factors out of the sum: accumulate strain energy
+    across load cases, then multiply once.
+
+    Parameters
+    ----------
+    us : list of displacement vectors, one per load case
+    weights : list of floats, one per load case (defaults to all 1.0)
+    """
+    if weights is None:
+        weights = np.ones(len(us))
+    x = rho.flatten(order='F')
+    ce_total = np.zeros(len(x))
+    c = 0.0
+    for u, w in zip(us, weights):
+        ce = np.einsum('ij,jk,ik->i', u[edof], KE, u[edof])
+        c += w*np.sum((x**penal)*ce)
+        ce_total += w*ce
+    dc = (-penal*(x**(penal-1))*ce_total).reshape((nely, nelx), order='F')
+    return c, dc
+
 
 def apply_filter(H, Hs, rho, dc):
     """Sensitivity filter as a single sparse matvec."""
