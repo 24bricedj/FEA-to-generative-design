@@ -68,8 +68,8 @@ def run(use_am, nelx=120, nely=40, volfrac=0.5, penal=3.0, rmin=3.0,
     KE = element_stiffness_Q4()
     edof = build_edof(nelx, nely)
     F, fixed = mbb_boundary_conditions(nelx, nely)
-    load_cases = quarter_point_load(nelx, nely)
-    weights = [1.0]                   # normalize the horizontal case
+    load_cases = mbb_load_cases(nelx, nely)[:1]   # standard MBB: single vertical load
+    weights = [1.0]                # normalize the horizontal case
     H, Hs = build_filter(nelx, nely, rmin)
     rho = volfrac*np.ones((nely, nelx))
     c_hist = []                                # --- CHANGE 3a: track compliance

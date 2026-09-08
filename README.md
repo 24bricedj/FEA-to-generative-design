@@ -369,6 +369,107 @@ python optimize_fine.py   # 180x60 + von Mises stress (~40 s)
 ```
  
 ---
+
+## Phase 6: Manufacturing-Constrained Generative Design
+
+Phase 5 produces the stiffest structure for a material budget. It does not produce a structure you can *build*. In laser powder-bed fusion, a downward-facing surface angled too shallowly has no solid material beneath it to conduct heat away or support the melt pool, so it sags or fails outright. This phase adds a self-support constraint directly into the optimization, so the design that comes out is printable by construction rather than fixed up afterward.
+
+### The 45° rule is geometry, not superstition
+
+The 45° limit isn't an arbitrary number — it falls out of the element grid. An element on layer n can only be supported by elements on layer n-1, and if every element is a uniform square, the only elements in contact with it are the one directly below, the one below-left, and the one below-right. That reach is one unit down and one unit over, which is exactly 45°. Anything further out — two columns over for one layer up — is 26.6°, too shallow to support itself.
+
+So the support condition is: element (i, n) is printable if any of (i-1, n-1), (i, n-1), (i+1, n-1) is solid. Three elements, and the 45° rule is enforced by construction rather than imposed as a separate check.
+
+### Printability is not local
+
+Unlike Phase 4, where each element's sensitivity depended only on that element's own displacement and stiffness, printability cannot be evaluated element by element, because **order matters**. Each layer depends on the layer below it, which depends on the layer below that, all the way down. An element's supporters are only actually present if *they* were supported in turn.
+
+So the constraint has to be built from the build plate upward: evaluate what exists on the plate, use that to determine what can be printed above it, and propagate up layer by layer. Printability is a property of an unbroken support chain, not of an element.
+
+### The filter
+
+Hard logic ("is any of my three supporters solid?") has zero gradient everywhere and is undefined at the switch — useless to a gradient-driven optimizer, for the same reason SIMP uses continuous densities rather than binary ones. Both operations are therefore smoothed:
+
+```
+S_i,n  = ( ρ̂_{i-1,n-1}^q + ρ̂_{i,n-1}^q + ρ̂_{i+1,n-1}^q )^(1/q)     smooth max (q-norm), q = 8
+ρ̂_i,n  = smin( ρ_i,n , S_i,n ),   smin(a,b) = (a + b − √((a−b)² + ε)) / 2
+```
+
+**The smooth max.** Raising each supporter to a high power makes the largest one dominate the sum — the same "big values dominate when raised to a power" mechanism as SIMP penalization, used here for a different purpose. Taking the q-th root then recovers that largest value. It is the familiar root-sum-of-squares generalized past q = 2: at q = 2 the smaller values still contribute and the result overshoots the true maximum, but by q = 8 they are crushed to nothing and the approximation is tight.
+
+**Why min and not a product.** The printable density is capped by two separate things: what the designer asked for, and how much support is available. You get the smaller of the two — that is a minimum, not a product. Using a product instead compounds partial support at every layer: starting from a uniform 0.5 field, the support factor is 0.574, so ρ̂ becomes 0.287, then 0.165 on the next layer, decaying geometrically up the build until the top of the part is annihilated and the stiffness matrix goes singular. The min form has no such decay, because a fully supported column passes ρ through untouched.
+
+The physics runs on ρ̂ (what can actually be printed), never on the raw design variable ρ.
+
+### Chaining the gradient back: a backward sweep
+
+The optimizer controls ρ, but the physics sees ρ̂, so the sensitivity has to be chained back through the filter.
+
+Support propagates upward, which means influence does too: nudging one element near the build plate changes the printable density of everything in an upward-widening 45° cone above it. Summing over that cone separately for each design variable would be enormously redundant, since the cones overlap heavily.
+
+The sweep therefore runs **top-down**, and the direction is forced rather than chosen. Element (i, n) affects the elements above it, so computing its total influence requires already knowing the accumulated influence of everything above. Sweeping from the top means each layer's accumulator is complete by the time the next layer needs it; sweeping from the bottom, you would reach an element without yet knowing what its effects above amount to. Support flows up, so sensitivity flows down.
+
+One sweep produces the gradient for every design variable. This is the same "reorganize the computation so shared work happens once" insight as the adjoint method in Phase 4 — and structurally it is backpropagation, arrived at from additive manufacturing physics rather than from machine learning.
+
+### Validation
+
+With no analytical reference, the gradient is checked against finite differences on a toy objective, decoupled from the FEA:
+
+```
+max relative error:  8.9e-05
+mean relative error: 5.3e-06
+```
+
+One finding worth recording: with the smin smoothing set too tight (ε = 1e-8) the finite-difference check failed at roughly 40% error, while the analytical gradient was correct. The function was so nearly kinked that finite differences could not resolve it. Loosening to ε = 1e-4 dropped the error to 1e-4. The check, not the derivation, was the thing that needed fixing.
+
+### Results: MBB beam
+
+| | Unconstrained | AM-constrained (45°) |
+|:---|:---:|:---:|
+| Compliance | 205.8 | 225.2 (**+9.4%**) |
+| Overhang violations | 60 / 2414 solid | 26 / 2419 solid |
+| Greyness | 0.176 | 0.283 |
+
+![AM comparison](phase6-AM/am_comparison.png)
+
+The constrained design restructures visibly: long shallow diagonals are replaced by branching members that trace support back down to the build plate. The ~9% compliance cost sits inside the published range for this benchmark, where reported values run from about 6% to 19% depending on formulation and build orientation.
+
+![AM stress comparison](phase6-AM/am_stress.png)
+
+Colouring both designs by von Mises stress on a shared scale shows where the extra material goes: the AM design's added branches carry almost no load (dark blue). They exist to satisfy printability, not to carry force — the cost of self-support made visible.
+
+Thresholded to solid/void at comparable volume (0.5029 vs 0.5040), both designs land at essentially the same compliance (189.6 vs 189.4), with peak von Mises of 1419 vs 1392 MPa under a 10 kN load. The near-identical thresholded performance suggests a substantial share of the +9.4% SIMP-level penalty is intermediate-density penalization rather than structural cost — though this is suggestive rather than rigorous, since thresholding is a non-optimal post-process that improved both designs materially.
+
+The ~1400 MPa peak is a point-load singularity, not a real stress: applying the entire load at a single node produces a theoretically infinite stress that worsens with mesh refinement. The colour scale is capped at the 98th percentile (478 MPa); the median of ~245 MPa is representative.
+
+### Multiple load cases
+
+The objective generalizes to a weighted sum over load cases, `c = Σ w_k c_k`. Because every case shares the same stiffness matrix, the `−p ρ^(p−1)` factor is common to all of them, and the sensitivity becomes an accumulation of weighted strain energy:
+
+```
+dc/dρⱼ = −p ρⱼ^(p−1) Σ_k w_k uₖⱼᵀ Kⱼ⁽⁰⁾ uₖⱼ
+```
+
+Weighting matters more than it appears. With a vertical and a horizontal load applied at equal weight, the vertical case contributed 206 and the horizontal 3.7 — a 56× imbalance that made the second case effectively invisible to the optimizer. Normalizing by each case's standalone compliance produces a genuinely braced design, at a cost of roughly 14% on the primary load case.
+
+### Feature size
+
+Minimum feature size is enforced by the Phase 5 sensitivity filter radius `rmin`, which imposes a physical length scale independent of the mesh — "no features thinner than rmin" is directly a minimum printable wall thickness. This is inherited from Phase 5 rather than added here; no separate parameter study was run.
+
+### Honest limitations
+
+- **Residual intermediate density.** The AM design is greyer than the unconstrained one (0.283 vs 0.176). This is a documented characteristic of the method: the optimizer exploits the smooth approximations to build regions of constant intermediate density that satisfy the filter without committing to solid material. Heaviside projection is the standard remedy; an attempt here either violated the volume constraint (when the constraint was enforced on ρ while the physics used the projected field) or degraded the design (when enforced correctly on the projected field), and was not pursued further.
+- **No stress constraint.** The objective is compliance, so the optimizer is blind to local stress. Thin members that are efficient load paths but locally overstressed are not penalized — a limitation visible by eye in some results.
+- **Build orientation is fixed.** Printability depends strongly on build direction; published studies show the same MBB problem costing anywhere from 0% to 11% compliance depending on orientation. This implementation prints bottom-up only.
+
+### Running Phase 6
+
+```bash
+cd phase6-AM
+python validate_gradient.py   # adjoint sweep vs finite differences
+python optimize_am.py         # MBB with and without the overhang constraint
+python stress_compare.py      # von Mises comparison
+```
  
 ## Tech Stack
  
