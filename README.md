@@ -391,8 +391,18 @@ So the constraint has to be built from the build plate upward: evaluate what exi
 Hard logic ("is any of my three supporters solid?") has zero gradient everywhere and is undefined at the switch — useless to a gradient-driven optimizer, for the same reason SIMP uses continuous densities rather than binary ones. Both operations are therefore smoothed:
 
 ```
-S_i,n  = ( ρ̂_{i-1,n-1}^q + ρ̂_{i,n-1}^q + ρ̂_{i+1,n-1}^q )^(1/q)     smooth max (q-norm), q = 8
-ρ̂_i,n  = smin( ρ_i,n , S_i,n ),   smin(a,b) = (a + b − √((a−b)² + ε)) / 2
+Support factor from the three elements below:
+
+    S = ( a^q + b^q + c^q )^(1/q)          smooth max (q-norm), q = 8
+
+where a, b, c are the printable densities of the elements below-left,
+directly below, and below-right.
+
+Printable density:
+
+    rho_hat = smin( rho, S )
+
+    smin(a,b) = ( a + b - sqrt((a-b)^2 + eps) ) / 2
 ```
 
 **The smooth max.** Raising each supporter to a high power makes the largest one dominate the sum — the same "big values dominate when raised to a power" mechanism as SIMP penalization, used here for a different purpose. Taking the q-th root then recovers that largest value. It is the familiar root-sum-of-squares generalized past q = 2: at q = 2 the smaller values still contribute and the result overshoots the true maximum, but by q = 8 they are crushed to nothing and the approximation is tight.
