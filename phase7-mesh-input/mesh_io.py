@@ -82,3 +82,15 @@ def read_mesh_3d(fname):
     tets[flip] = tets[flip][:, [0, 2, 1, 3]]
 
     return nodes, tets, node_sets, segments
+
+
+def read_element_sets(fname):
+    """Named groups of TETS (3D physical groups), as element indices.
+
+    Returns {name: array of tet indices}, in the same order as the tets that
+    read_mesh_3d returns, so  rho[sets["keep"]]  picks out the keep elements.
+    """
+    m = meshio.read(fname)
+    return {name: np.asarray(by_type["tetra"], dtype=int)
+            for name, by_type in m.cell_sets_dict.items()
+            if not name.startswith("gmsh:") and "tetra" in by_type}
