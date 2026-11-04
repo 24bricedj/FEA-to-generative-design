@@ -45,8 +45,10 @@ def read_mesh(fname):
 
 
 def read_mesh_3d(fname):
-    """3D version: nodes (n,3), tets (ne,4), named node sets, and named line
-    segments (for distributing line loads along tagged edges)."""
+    """3D version: nodes (n,3), tets (ne,4), named node sets, and the named
+    boundary cells of each group:
+        edge group -> (k, 2) line segments   (for line_load)
+        face group -> (k, 3) surface triangles (for surface_load)"""
     m = meshio.read(fname)
     nodes = m.points.copy()
     tets = m.cells_dict["tetra"].astype(int)
@@ -60,7 +62,7 @@ def read_mesh_3d(fname):
             if ctype in ("vertex", "line", "triangle"):
                 cells = m.cells_dict[ctype][idx]
                 ids.append(cells.ravel())
-                if ctype == "line":
+                if ctype in ("line", "triangle"):
                     segments[name] = cells
         if ids:
             node_sets[name] = np.unique(np.concatenate(ids))

@@ -45,3 +45,19 @@ def line_load(nodes, segments, ndof, direction, total):
         F[3*n1 + direction] += q*l/2
         F[3*n2 + direction] += q*l/2
     return F
+
+
+def surface_load(nodes, faces, ndof, direction, total):
+
+    F = np.zeros(ndof)
+    a = nodes[faces[:, 0]]     # first corner of every triangle,  (k, 3)
+    b = nodes[faces[:, 1]]     # second corner
+    c = nodes[faces[:, 2]]     # third corner
+    A = 0.5*np.linalg.norm(np.cross(b - a, c - a), axis=1)
+    p = total/A.sum()
+    for (n1, n2, n3), Ai in zip(faces, A):
+        F[3*n1 + direction] += p*Ai/3
+        F[3*n2 + direction] += p*Ai/3
+        F[3*n3 + direction] += p*Ai/3
+    
+    return F
