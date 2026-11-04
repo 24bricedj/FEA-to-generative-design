@@ -32,8 +32,10 @@ def main(fname, volfrac=0.25, penal=3.0, rmin=0.25, nit=300):
     KE, V, edof, cent = precompute_3d(nodes, tets)
     ndof = 3*len(nodes)
     keep = esets["keep"]
+    void = esets["void"]
     print(f"mesh: {len(nodes)} nodes, {len(tets)} tets, {ndof} DOFs; "
-          f"keep = {V[keep].sum()/V.sum():.1%} of the volume  "
+          f"keep = {V[keep].sum()/V.sum():.1%}, void = {V[void].sum()/V.sum():.1%} "
+          f"of the volume  "
           f"(setup {time.time()-t0:.1f}s)")
 
     # ------------------------------------------------------------------
@@ -56,15 +58,20 @@ def main(fname, volfrac=0.25, penal=3.0, rmin=0.25, nit=300):
     #
     # 3. START VALUE. rho starts at volfrac everywhere -- then lock the keep
     #    elements so the very first FEA solve already sees them solid.
+    #
+    # 4. (NEW) VOID. esets["void"] is now loaded above as `void`. Lock those
+    #    elements at the minimum density at the start too -- and give your
+    #    oc_update a `void=None` parameter that does the same every iteration
+    #    (same spot and same guard as keep).
     # ------------------------------------------------------------------
     b = sets["bolt"]
     fixed = np.concatenate([3*b, 3*b+1, 3*b+2])
     yc = nodes[faces["pin"]][:, :, 1].mean(axis=1)
-    top = faces["pin"][yc >YP]
+    top = faces["pin"][yc > YP]
     F = surface_load(nodes, top, ndof, direction=1, total=1.0)
     rho = volfrac*np.ones(len(tets))
     rho[keep] = 1.0
-
+    # piece 4 (void) goes here
 
     print(f"supports: {len(fixed)} fixed DOFs   load: total Fy = {F[1::3].sum():+.3f}")
 
@@ -74,12 +81,14 @@ def main(fname, volfrac=0.25, penal=3.0, rmin=0.25, nit=300):
         u = fea_solve_3d(rho, penal, KE, edof, ndof, fixed, F)
         c, dc = compliance_and_sensitivity(rho, penal, KE, edof, u)
         dc = apply_filter(H, Hs, rho, dc, V)
-        rho = oc_update(rho, V, volfrac, dc, move_schedule(it), keep=keep)
+        rho = oc_update(rho, V, volfrac, dc, move_schedule(it),
+                         keep=keep, void=void)
 
         c_hist.append(c)
         if it % 10 == 0:
             print(f"  it {it:3d}  c={c:9.3f}  vol={(rho*V).sum()/V.sum():.3f}  "
-                  f"keep min={rho[keep].min():.2f}  ({time.time()-t0:.0f}s)")
+                  f"keep min={rho[keep].min():.2f}  void max={rho[void].max():.3f}  "
+                  f"({time.time()-t0:.0f}s)")
         if it > 80 and (max(c_hist[-20:]) - min(c_hist[-20:]))/c < 1e-3:
             print(f"  converged at it={it}")
             break
@@ -90,11 +99,13 @@ def main(fname, volfrac=0.25, penal=3.0, rmin=0.25, nit=300):
           f"({time.time()-t0:.0f}s total)")
 
     stem = fname.rsplit(".", 1)[0]
+    region = np.zeros(len(tets))      # 0 design, 1 keep, -1 void (for ParaView)
+    region[keep] = 1.0
+    region[void] = -1.0
     meshio.write(f"{stem}_result.vtu",
                  meshio.Mesh(nodes, [("tetra", tets)],
                              cell_data={"rho": [rho],
-                                        "keep": [np.isin(np.arange(len(tets)),
-                                                         keep).astype(float)]}))
+                                        "region": [region]}))
 
     # quick look: solid elements from two angles (ParaView is the real view)
     s = rho > 0.5

@@ -19,7 +19,7 @@ from fem_mesh import (precompute, build_filter, apply_filter,
                       fea_solve, compliance_and_sensitivity)
 
 
-def oc_update(rho, V, volfrac, dc, move, keep=None):
+def oc_update(rho, V, volfrac, dc, move, keep=None, void=None):
 
     """Phase 5 OC update, with the move limit passed in."""
     l1, l2 = 0.0, 1e9
@@ -33,6 +33,8 @@ def oc_update(rho, V, volfrac, dc, move, keep=None):
                         rho*np.sqrt(B)))))
         if keep is not None :
             rho_new[keep] = 1.0 
+        if void is not None:
+            rho_new[void] = 0.001
         if (rho_new*V).sum() > volfrac*V.sum():
             l1 = lmid
         else:
