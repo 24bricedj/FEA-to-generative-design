@@ -24,6 +24,19 @@ from optimize_mesh import oc_update, move_schedule
 
 YP = 1.1          # pin-hole center height (must match mesh_bracket3d.py)
 
+def pin_load(nodes, pin_faces, ndof, d, T, axis_pt):
+    d = np.asarray(d, dtype=float)
+    assert abs(d[2]) < 1e-12, "pin load must be perpendicular to the pin (z)"
+    d = d/np.linalg.norm(d)       # make d a unit vector, so T is the true total
+    """Load T on the pin hole, pulling in unit direction d (perpendicular
+    to the pin axis). Only the half of the hole facing d bears."""
+    cent = nodes[pin_faces].mean(axis=1)
+    r = cent - axis_pt
+    r[:, 2] = 0
+    tri = pin_faces[r @ d > 0]
+    F = surface_load(nodes, tri, ndof, direction=0, total=T*d[0]) \
+      + surface_load(nodes, tri, ndof, direction=1, total=T*d[1])
+    return F
 
 def main(fname, volfrac=0.25, penal=3.0, rmin=0.25, nit=300):
     t0 = time.time()
@@ -69,6 +82,8 @@ def main(fname, volfrac=0.25, penal=3.0, rmin=0.25, nit=300):
     yc = nodes[faces["pin"]][:, :, 1].mean(axis=1)
     top = faces["pin"][yc > YP]
     F = surface_load(nodes, top, ndof, direction=1, total=1.0)
+    F2 = pin_load(nodes, faces["pin"], ndof, d=(0, 1, 0), T=1.0, axis_pt=np.array([2.0, YP, 0.0]))
+    print("pin_load matches old load:", np.allclose(F, F2))
     rho = volfrac*np.ones(len(tets))
     rho[keep] = 1.0
     # piece 4 (void) goes here

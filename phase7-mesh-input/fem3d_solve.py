@@ -61,3 +61,25 @@ def surface_load(nodes, faces, ndof, direction, total):
         F[3*n3 + direction] += p*Ai/3
     
     return F
+
+from scipy.sparse.linalg import splu
+
+
+def fea_solve_3d_multi(rho, penal, KE, edof, ndof, fixed, Fs):
+    """Solve K u = F for SEVERAL load cases at once.
+
+    Fs : (ndof, n_cases) -- one column per load case
+    Returns U : (ndof, n_cases) -- one displacement column per case
+
+    K depends only on rho, so it's the same for every case: factorize it
+    ONCE (the expensive part), then back-substitute each column (cheap).
+    """
+    sK = (KE*(rho**penal)[:, None, None]).ravel()
+    iK = np.repeat(edof, 12, axis=1).ravel()
+    jK = np.tile(edof, (1, 12)).ravel()
+    K = coo_matrix((sK, (iK, jK)), shape=(ndof, ndof)).tocsc()
+    free = np.setdiff1d(np.arange(ndof), fixed)
+    lu = splu(K[free][:, free])          # factorize once
+    U = np.zeros_like(Fs)
+    U[free] = lu.solve(Fs[free])         # every load case in one call
+    return U
