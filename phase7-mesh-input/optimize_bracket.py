@@ -38,6 +38,35 @@ def pin_load(nodes, pin_faces, ndof, d, T, axis_pt):
       + surface_load(nodes, tri, ndof, direction=1, total=T*d[1])
     return F
 
+def torsion_load(nodes, pin_faces, ndof, M, axis_pt):
+    """Torque M about x on the pin -> a linear force couple along z, in y.
+    Back half of the pin pushes one way, front half the other (sigma = My/I)."""
+    cent = nodes[pin_faces].mean(axis=1)                       # triangle centroids
+    zc = 0.5*(nodes[pin_faces][:, :, 2].min() + nodes[pin_faces][:, :, 2].max())
+    a, b, c = (nodes[pin_faces[:, i]] for i in range(3))
+    A = 0.5*np.linalg.norm(np.cross(b - a, c - a), axis=1)     # triangle areas
+
+    s = cent[:,2] - zc                     # 1. lever arm: each centroid's z minus zc
+    dy = -np.sign(s)             #    direction each triangle pushes: +1 up / -1 down
+    bear = (cent[:,1] - axis_pt[1])*dy > 0                   # 2. True where the centroid is on the side dy points to
+                                 #    (r.d > 0 again: height above the axis, times dy)
+    f = -s*A*bear                      # 3. force on each triangle: linear in s, times its area,
+                                 #    and zero where bear is False  (hint: -s*A*bear)
+    back, front = s < 0, s > 0                  # which triangles are in each half
+    Fb, Ff = f[back].sum(), f[front].sum()      # each half's total force
+    mb = np.sum(-s[back]*f[back])               # each half's moment
+    mf = np.sum(-s[front]*f[front])
+    beta = M/(mf - Ff*mb/Fb)                    # your two equations
+    alpha = -beta*Ff/Fb
+    f[back] *= alpha
+    f[front] *= beta
+    F = np.zeros(ndof)
+    for (n1, n2, n3), fi in zip(pin_faces, f):
+        F[3*n1 + 1] += fi/3      # y-DOFs only; a third to each node, as always
+        F[3*n2 + 1] += fi/3
+        F[3*n3 + 1] += fi/3
+    return F
+
 def main(fname, volfrac=0.25, penal=3.0, rmin=0.25, nit=300):
     t0 = time.time()
     nodes, tets, sets, faces = read_mesh_3d(fname)
