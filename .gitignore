@@ -5,3 +5,6 @@ __pycache__/
 *.msh
 *.vtu
 *.pvsm
+
+desktop.ini
+*_result.png
