@@ -21,6 +21,7 @@ This project is built on three principles:
 1. **Derive before coding.** Every method is worked out by hand -- weak forms, shape functions, sensitivity analysis -- before a line of code is written. The math is the point; the code is the translation.
 2. **Validate relentlessly.** Each phase is checked against an analytical solution or a published benchmark. Nothing is trusted until it is verified.
 3. **Build in layers.** 1D before 2D, linear before nonlinear, direct solvers before ML acceleration. Each layer rests on a foundation that has already been proven correct.
+ 
 ---
  
 ## Capstone Target
@@ -40,8 +41,11 @@ The broader thesis is unchanged — build every layer from first principles to u
 | 3 | Thermal FEA (1D → 2D conduction → thermal-structural coupling) | Complete |
 | 4 | Sensitivity analysis (adjoint method) | Complete |
 | 5 | SIMP topology optimization | Complete |
-| 6 | Manufacturing-constrained generative design (AM overhang, feature size) | Planned |
-| 7 | ML acceleration (neural reparameterization / PINN surrogates) | Planned |
+| 6 | Manufacturing-constrained generative design (AM overhang, feature size) | Complete |
+| 7 | Arbitrary meshes and 3D topology optimization (Gmsh input, tetrahedra, multigrid, multi-load) | Complete |
+| 8 | GE jet-engine bracket benchmark (validation against OptiStruct and the competition winner) | In progress |
+| 9 | General optimizer (MMA), density filter, stress constraints | Planned |
+| 10 | ML acceleration (neural reparameterization / PINN surrogates) | Planned |
  
 ---
  
@@ -64,6 +68,7 @@ The pipeline: build mesh -> element stiffness matrices -> global assembly -> con
 - **Global assembly** -- scattering element matrices into the global stiffness matrix via a connectivity table.
 - **Consistent load vector** -- distributed body loads and point loads, derived from the shape-function projection.
 - **Dirichlet boundary conditions** -- applied by direct elimination of constrained degrees of freedom.
+ 
 ### Validation
  
 The solver is checked against the closed-form analytical solution. At the nodes, the FEA result matches to **machine precision** (~1e-15) -- a consequence of the nodal superconvergence property of linear elements for this problem.
@@ -104,6 +109,7 @@ where B is the 3×6 strain-displacement matrix (built from the CST shape-functio
 - **CST element stiffness** -- derived from the linear shape functions over a triangle; validated against four physical properties (symmetry, rank-3 deficiency for the three rigid-body modes, zero-energy rigid translation, positive semi-definiteness).
 - **Global assembly** -- 2-DOF-per-node scatter via a connectivity table, generalizing the Phase 1 assembly. Validated by confirming the assembled global matrix retains exactly 3 rigid-body modes.
 - **Boundary conditions and loads** -- DOF-level Dirichlet constraints (allowing per-direction fixing) and distributed edge loads.
+ 
 ### Validation: cantilever benchmark
  
 The solver is tested on a clamped cantilever (length = 5× depth) under a distributed tip load, compared against Euler-Bernoulli beam theory (δ = PL³/3EI).
@@ -132,7 +138,7 @@ Unlike Phase 1, there is no exact answer to validate against, because Euler-Bern
  
 Euler-Bernoulli reference: **0.500**
  
-**Self-convergence view:** With no analytical truth available, the finest mesh is used as a stand-in reference, and the error of each coarser mesh is measured against it. On a log-log plot the error falls along a clean line, running roughly parallel to the slope-2 reference — a touch steeper, measured at 1.82. It isn't exactly 2.00 because the finest mesh is itself still slightly converging, so it's an imperfect reference, and that contamination pulls the slope down a little. Even so, it confirms the second-order-ish convergence expected for CST displacement.
+**Self-convergence view:** With no analytical truth available, the finest mesh is used as a stand-in reference, and the error of each coarser mesh is measured against it. On a log-log plot the error falls along a clean line, running roughly parallel to the slope-2 reference — a touch shallower, measured at 1.82. It isn't exactly 2.00 because the finest mesh is itself still slightly converging, so it's an imperfect reference, and that contamination pulls the slope down a little. Even so, it confirms the second-order-ish convergence expected for CST displacement.
  
 **Together:** the plateau confirms *what* the solver converges to (the physics), and the self-convergence confirms *how fast* (the numerics). Together they validate the solver without an exact answer — the kind of verification you'd use on any real part where no closed-form solution exists.
  
@@ -169,6 +175,7 @@ d/dx(kA dT/dx) + Q = 0
 - **Element conductivity matrix** -- `(kA/h)[[1,-1],[-1,1]]`, the Phase 1 stiffness matrix under the isomorphism (E → k).
 - **Nonzero Dirichlet BCs** -- the one genuinely new piece vs. Phase 1, derived by hand and validated.
 - **Validation** -- against two hand-derived analytical profiles: a linear profile (no source) and a quadratic profile (uniform source), both matching to machine precision (~1e-15) at the nodes. Convergence confirmed at **O(h²)**, slope 2.00.
+ 
 ![1D thermal: source-driven quadratic profile](phase3-thermal/1d-conduction/profile_caseB.png)
  
 ### Step 2: 2D heat conduction (CST)
@@ -181,6 +188,7 @@ k_e = Bᵀ B · k · A,    B = (1/2A) [[b1,b2,b3],[c1,c2,c3]]
  
 - **Insulated boundaries for free** -- a zero-flux edge is a natural (Neumann) BC that falls out of the weak form automatically. Insulated edges require *no code*: doing nothing to a boundary enforces zero heat flux through it.
 - **Validation** -- a linear-profile benchmark (insulated top/bottom, fixed sides) matches to machine precision, confirming the insulated-edge behavior. A curved **sinusoidal-edge benchmark** (exact sin·sinh solution) gives **O(h²)** convergence, slope 1.975.
+ 
 ![2D temperature field](phase3-thermal/2d-conduction/temperature_field.png)
  
 ### Step 3: Thermal-structural coupling
@@ -245,7 +253,7 @@ With the SIMP-style stiffness model `K = Σ ρᵢ Kᵢ⁽⁰⁾`, the sensitivit
 dc/dρⱼ = -uⱼᵀ Kⱼ⁽⁰⁾ uⱼ
 ```
  
-which is (twice the negative of) the **strain energy stored in element j**. Physically: the elements storing the most strain energy are where adding material helps stiffness most. That ranking is the signal topology optimization follows.
+which is the negative of twice the **strain energy stored in element j** (strain energy is ½uᵀKu). Physically: the elements storing the most strain energy are where adding material helps stiffness most. That ranking is the signal topology optimization follows.
  
 ### Validation against finite differences
  
@@ -319,7 +327,7 @@ Differentiating the Lagrangian L = c(ρ) + λ(Σ ρᵢVᵢ − V*) and setting i
  
 The intuition: if element A produces more stiffness per unit material than element B, you can move material from B to A and gain stiffness for free — so you were not at the optimum. Unequal benefit always leaves a profitable shuffle on the table. Only when all elements are equal does it stop. It is water finding its level.
  
-The update uses a deal ratio Bⱼ that measures how good a deal each element is: ρⱼ(new) = ρⱼ · Bⱼ. Bargains (B > 1) grow, duds (B < 1) shrink, and elements at balance (B = 1) hold. λ is not known in advance; it is found each iteration by binary search, since total volume decreases monotonically with λ. Two guardrails keep it stable: a move limit of 0.2, which caps how far a density can shift per step, and clamping ρ between 0.001 and 1 — the small floor keeps the stiffness matrix invertible.
+The update uses a deal ratio Bⱼ = −(∂c/∂ρⱼ)/(λVⱼ) that measures how good a deal each element is: ρⱼ(new) = ρⱼ · √Bⱼ, where the square root damps the step. Bargains (B > 1) grow, duds (B < 1) shrink, and elements at balance (B = 1) hold. λ is not known in advance; it is found each iteration by binary search, since total volume decreases monotonically with λ. Two guardrails keep it stable: a move limit of 0.2, which caps how far a density can shift per step, and clamping ρ between 0.001 and 1 — the small floor keeps the stiffness matrix invertible.
  
 ### Filtering: checkerboards and mesh independence
  
@@ -356,6 +364,7 @@ Two honest caveats:
  
 - **The 1337 MPa peak is a point-load singularity**, not a real stress. Applying the entire load at a single node produces a theoretically infinite stress that gets *worse* with refinement. The colour scale is capped at the 98th percentile (319 MPa) so the structure remains readable; the median stress of 164 MPa is representative.
 - **Thresholding changed compliance by -8.7%** (208.6 → 190.4). The thresholded structure is stiffer, because borderline elements snap to fully solid. This is an honest measure of how much the residual gray zones were contributing.
+ 
 ### Mesh independence in practice
  
 Running the same problem at 60×20 with rmin = 1.5 and at 180×60 with rmin = 4.5 (the filter radius scaled with the mesh) converges to the same physical design -- c = 203.3 and c = 208.6 respectively -- rather than the finer mesh inventing thinner members. This is the mesh-independence the filter was derived to guarantee, confirmed empirically.
@@ -480,13 +489,181 @@ python validate_gradient.py   # adjoint sweep vs finite differences
 python optimize_am.py         # MBB with and without the overhang constraint
 python stress_compare.py      # von Mises comparison
 ```
- 
+
+---
+
+## Phase 7: Arbitrary Meshes and 3D Topology Optimization
+
+Phases 1–6 all ran on structured grids I generated myself: rows of identical squares or triangles, with loads and supports placed by node number. A real part doesn't arrive that way. It arrives as CAD, meshed by someone else, with elements of every size, and its loads live on surfaces rather than on numbered nodes. This phase turns the stack into a tool that accepts **any tetrahedral mesh** with named surfaces, optimizes it in 3D, and scales to hundreds of thousands of elements on a laptop. It ends with a bracket carrying four simultaneous load cases at 264,000 elements in about ten minutes.
+
+### Meshes from Gmsh, boundary conditions by name
+
+Geometry is built in [Gmsh](https://gmsh.info), and every surface that matters is tagged as a *physical group*: `"bolt"`, `"pin"`, `"symmetry"`, `"load"`. The solver never needs to know where anything is; it looks the groups up by name. Supports, loads, and locked regions all become "apply this to the nodes or elements of that group", which is what makes the same code work on a beam, a bracket, or a competition part.
+
+Unstructured meshes break one hidden assumption of Phase 5: that every element is the same size. Two places had to change.
+
+- **The optimality-criteria update.** The deal ratio becomes Bⱼ = −(∂c/∂ρⱼ) / (λVⱼ): benefit per unit of *material*, not per element. The volume check becomes Σ ρⱼVⱼ against V* · ΣVⱼ.
+- **The filter.** Averaging raw sensitivities over neighbors lets big elements outvote small ones. Filtering the per-unit-volume quantity ρⱼ(∂c/∂ρⱼ)/Vⱼ and scaling back by Vⱼ fixes it.
+
+Validation on the 2D MBB beam, meshed with unstructured triangles:
+
+| Mesh | Compliance |
+|:---|:---:|
+| Structured grid (Phase 5) | 203.3 |
+| Unstructured, uniform size (2788 triangles) | 202.81 (0.25%) |
+| Unstructured, graded (20× element-area range) | 203.1 |
+
+The graded mesh is the real test. Without the volume weighting it gives a different design. With it, a 20× spread in element size changes nothing.
+
+![2D unstructured MBB](phase7-mesh-input/mbb_result.png)
+
+### The linear tetrahedron
+
+The 3D element is the direct descendant of the Phase 2 constant-strain triangle. Four nodes, three displacements each, so 12 DOFs. Linear shape functions make the strain constant, so the element integral collapses to a single product:
+
+```
+k = Bᵀ D B · V          B: 6×12    D: 6×6    V: tet volume
+```
+
+The six strains are εx, εy, εz, γxy, γyz, γxz. B is four 6×3 blocks, one per node, built from that node's shape-function gradients (b, c, d). The shape-function coefficients come straight from inverting the 4×4 matrix [1 x y z] of the corner coordinates, and its determinant is 6V. D is the isotropic 3D law: normal and shear strains decouple, normal strains couple through Poisson's ratio, and D becomes singular at ν = 0.5, the incompressible limit.
+
+Validation is about what the element *must not* do. The 12×12 matrix should have rank 6 and **exactly six zero eigenvalues**: three rigid translations and three rigid rotations, the motions that cost no energy. On a unit tet and on a rotated, scaled, shifted tet:
+
+```
+shape (12, 12), symmetric, rank 6, zero eigenvalues: 6
+energy of a rigid z-rotation: ~1e-16
+```
+
+As a system-level check, a thin 3D slab of the MBB beam, modeled as a quarter with symmetry planes, reproduces the 2D answer: **c/T = 199.9 against 202.8** (1.4%). The 3D result is slightly stiffer, as it should be: a plane-stress model lets the slab contract freely through its thickness, while the full 3D solid partially restrains that.
+
+![3D MBB, thin slab](phase7-mesh-input/mbb3d_result.png)
+
+### A real bracket: loads on surfaces, bolts, and locked regions
+
+The test part is a block bolted down at four corners and loaded through a pin hole at the top. Three new ideas were needed.
+
+**Loads on surfaces.** A force spread uniformly over a face of many triangles of different sizes is a pressure, p = F / A_face. Each triangle carries p·A_tri, and each of its three nodes gets a third of that. The third comes from integrating a linear shape function over the triangle, the same reason a line segment gives half its load to each end. The pattern runs through every dimension: **l/2 → A/3 → V/4**. Shared nodes collect a share from every triangle they touch, which is the same accumulation as assembling K. A two-triangle hand calculation (areas 3 and 1, F = 8) gives nodal forces of 2, 2.667, 2.667, and 0.667, which the code reproduces exactly.
+
+**Bolts and pins.** A bolt is modeled as a rigid pin: every node on the hole wall is fixed in all three directions. That's too stiff compared with a real bolt, which bends and lets the hole wall give. By Saint-Venant's principle, though, the error is local, dying out within a hole diameter or two. A pin pulling in direction **d** presses only on the half of the hole facing **d**, so the loaded triangles are the ones with **r · d > 0**, where r runs from the pin axis to the triangle's centroid. One dot product handles up, down, sideways, and every angle in between.
+
+**Keep and void regions.** Some material is not the optimizer's to decide. A ring around every hole is **keep**, locked at ρ = 1, which also places the design region outside the zone where the rigid-bolt model is wrong. The column above each bolt is **void**, locked at the minimum density, because a bolt needs room for its head and a wrench. Both are enforced inside the OC binary search, not after it, so the volume check sees them at their true values and the budget stays honest. Each lock gets its own `if ... is not None` guard. Without it, `rho[None] = 1.0` silently sets *every* element to 1 in NumPy.
+
+| Bracket | Compliance |
+|:---|:---:|
+| Bolts in blind holes, pin pulling up | 4.691 |
+| Through-bolts + wrench-clearance void columns | 4.853 (+3.4%) |
+
+The first design is a four-legged pyramid: straight members from each bolt to the pin, all in tension. The second is forced to grab each bolt from the side, which grows an eyelet around every hole. The 3.4% is the **price of wrench access**. It had to be positive: adding a constraint only removes designs from the allowed set, so the best of what remains can't beat the best of the original.
+
+### Making it fast
+
+The coarse bracket (39k tets) took about 13 minutes. Refining it hit two walls.
+
+**The direct solver.** `spsolve` factorizes K, and in 3D the fill-in during factorization grows much faster than the matrix itself. Measured on the bracket: 4.2 s at 23.5k DOFs, 44 s at 64.7k DOFs. On a log-log plot that's a slope of **k ≈ 2.3**, which predicts about 280 s per solve at 144k DOFs, or around six hours for one optimization.
+
+The replacement is **conjugate gradient** preconditioned with **algebraic multigrid** (pyamg). CG never factorizes K; each step just multiplies K by a vector, which costs about N. Multigrid keeps the number of steps small even though void elements are a billion times softer than solid ones (0.001³). Smooth error components that would take a local solver thousands of steps are removed on coarser levels instead. For elasticity, the coarse levels have to be told about the **six rigid-body modes**, the same six zero eigenvalues the tet validation found. Each solve starts from the previous iteration's displacement (a warm start). Same answer as `spsolve` to 5×10⁻¹¹, and 8× faster on the *coarse* mesh. The CG step count stayed around 30–40 as the mesh grew 7×, which is the whole reason multigrid scales.
+
+**The filter.** The neighbor-list filter compares each element with every element within rmin, and that count grows like (rmin/h)³: 187 neighbors per element at h = 0.12, 1,224 at h = 0.06, about 6.5 GB just to build. The replacement is a **PDE (Helmholtz) filter**:
+
+```
+−r² ∇²ρ̃ + ρ̃ = ρ            r = rmin / (2√3)
+```
+
+This is the Phase 3 heat-conduction equation with a loss term. The raw density is the heat source, the filtered density is the temperature, and the loss term (like convection off a fin) limits how far each element's influence spreads. The conduction matrix is the Phase 3 element in 3D, k = V·GᵀG, and the whole system is factorized **once** for the entire optimization. It matches the neighbor-list filter at a correlation of 0.9993. One caveat I found: it only behaves as intended when the mesh resolves r (h ≲ r). On the coarse mesh, where r was smaller than an element, it gave 3.4% higher compliance than the neighbor-list filter; one refinement later, only 1.2%.
+
+| | Before | After |
+|:---|:---:|:---:|
+| 39k tets | ~13 min | **30 s** |
+| 264k tets (7× more elements) | ~6 h of solves, ~6.5 GB filter | **~12 min** on a laptop |
+
+Optimizations also now stop when the **design** stops moving (max |Δρ| < 0.01), not just the compliance. That ends most runs in 30–40 iterations instead of a fixed 80.
+
+Keeping rmin fixed while refining gives the same design with smoother surfaces. That's mesh independence from Phase 5, now visible in 3D. Compliance rises slightly with refinement (4.85 → 4.91 → 4.95) because coarse linear tets are too stiff, the same family of error as the shear locking documented in Phase 2. The fine-mesh number is the trustworthy one.
+
+| 39k tets, direct solver | 264k tets, multigrid + PDE filter |
+|:---:|:---:|
+| ![coarse](images/Bracket_full_coarse_mesh.png) | ![fine](images/Bracket_full_fine_mesh.png) |
+
+### Multiple load cases and torsion
+
+A real bracket sees more than one load. The GE jet-engine bracket challenge specifies four: vertical, horizontal, 42° from vertical, and a torsion. The 3D version uses the Phase 6 weighted sum, with one change that matters a lot:
+
+```
+c = Σᵢ wᵢ · cᵢ / cᵢ⁽⁰⁾            cᵢ⁽⁰⁾ = case i's compliance at iteration 0
+```
+
+Dividing by each case's starting compliance makes every term begin at exactly 1, so w = 1 really means equal importance. Because compliance is quadratic in the load (c = FᵀK⁻¹F), the load *magnitude* cancels out of cᵢ/cᵢ⁽⁰⁾ entirely. A torque of 5,000 lb·in and one of 1.0 give the same design, and only the weights set importance. All four cases share one K per iteration, so they share one multigrid setup, the iterative version of factorizing once. Four load cases cost barely more than one.
+
+**Angled loads.** `surface_load` pushes along one axis, so a 42° pull is applied by superposition: T·sin 42° in x plus T·cos 42° in y, both on the half of the hole facing the full pull direction.
+
+**Torsion.** A smooth pin is a hinge, so it cannot carry torque about its own axis. A torque about a perpendicular axis rotates the pin rigidly, which pushes one end of the hole up and the other down: a **force couple** with zero net force. The rigid rotation makes the bearing load linear along the pin, and setting its moment equal to the applied torque gives
+
+```
+q(z) = 12M(z − z_c) / W³ = M(z − z_c) / I,      I = W³/12
+```
+
+which is σ = My/I from beam bending, turned sideways. Each half of the couple should push with 1.5M/W = 0.750; the code gives 0.752. On the first attempt, the discrete couple carried a stray net force of about 4% of each half's push on the fine mesh, because the triangles aren't mirror images front to back. One scale factor cannot satisfy two conditions (zero net force *and* moment = M), so each half gets its own, found from a 2×2 linear system. After that the net force is exactly zero.
+
+| Compliance | Up only | 3 cases | 4 cases (+ torsion) |
+|:---|:---:|:---:|:---:|
+| Up | **4.954** | 5.580 | 5.571 |
+| Horizontal | — | 3.112 | 3.260 |
+| 42° | — | 4.377 | 4.509 |
+| Torsion | — | — | 12.135 |
+
+Every case improved about 11–13× from its starting value, and none was ignored. "Up" costs about 12.6% when the bracket also has to handle the others. That's unavoidable: the single-load run already found the best possible design for "up", and the multi-load design is just another allowed layout. The 3-case design came out lopsided, and superposition explains it: the 42° load is "up" plus "+x", which *adds* tension in the legs behind the pin and partly *cancels* it in the legs in front. Compliance itself can't tell left from right, since c(−F) = c(F). Torsion then pulled material out along the full length of the pin, building a **torsion box**, because resistance to a couple grows with the cube of the spread.
+
+![4 load cases](images/Bracket_full_4loads.png)
+
+### Honest limitations
+
+- **Compliance can't see buckling or stress.** The single-load bracket's legs are all in tension, which is fine. Under the sideways and angled loads, some legs go into compression, and the optimizer made those the *thinner* ones. Slender compression members are exactly where real parts buckle. Stress and buckling constraints need a more general optimizer than OC (MMA, planned).
+- **The sensitivity filter is a heuristic.** It smooths dc, so OC isn't following the exact gradient. On the fine single-load bracket, compliance bottomed out at 4.9456 and crept back up to 4.954 while the design sharpened. A density filter, with the chain rule carried through, gives consistent gradients, which MMA requires.
+- **Rigid supports.** Fixed hole walls are stiffer than real bolts and create stress singularities at their edges. Keep rings keep the design region away from them, but stress values right at a support aren't meaningful.
+- **No overhang constraint in 3D yet.** The Phase 6 printability filter is 2D and layer-by-layer; the 3D designs here aren't checked for self-support.
+
+### Running Phase 7
+
+```bash
+cd phase7-mesh-input
+
+# 2D, any triangle mesh
+python mesh_mbb.py 0.05             # unstructured MBB -> mbb.msh
+python optimize_mesh.py mbb.msh
+
+# 3D tetrahedron
+python check_tet.py                 # rank 6, six rigid-body modes
+python mesh_mbb3d.py 0.05           # thin-slab MBB, quarter model
+python optimize3d.py mbb3d.msh
+
+# bracket: checks on the coarse mesh first
+python check_surface_load.py        # hand calc: 2, 2.667, 2.667, 0.667
+python mesh_bracket3D.py 0.12       # ~39k tets -> bracket.msh
+python optimize_bracket.py bracket.msh          # single load, direct solver
+python check_fast_solve.py bracket.msh          # multigrid vs spsolve
+python check_pde_filter.py bracket.msh          # PDE vs neighbor-list filter
+python check_torsion.py bracket.msh             # pure couple: zero net force, moment M
+
+# then the fine mesh
+python mesh_bracket3D.py 0.06       # ~264k tets
+python optimize_bracket_fine.py bracket.msh     # single load
+python optimize_bracket_multi.py bracket.msh    # 4 load cases
+```
+
+Requires `gmsh`, `meshio`, and `pyamg` (`pip install gmsh meshio pyamg`).
+
+---
+
 ## Tech Stack
  
 - **Python 3.11**
 - **NumPy** -- array math, linear algebra
+- **SciPy** -- sparse matrices, sparse direct solvers, KD-trees
 - **Matplotlib** -- visualization
-(Later phases will add SciPy, PyTorch, and optimization libraries.)
+- **Gmsh** + **meshio** -- geometry, meshing, and mesh I/O (Phase 7+)
+- **pyamg** -- algebraic multigrid preconditioning (Phase 7+)
+- **ParaView** -- 3D visualization of results
+(Later phases will add PyTorch and further optimization libraries.)
  
 ---
  
