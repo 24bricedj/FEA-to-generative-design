@@ -657,7 +657,9 @@ In 2013 GE posted a jet-engine mounting bracket online and challenged anyone to 
  
 That makes it the hardest honest test available for this project: a real aerospace part, real loads, a commercial solver's answers to check against, and a field of human designs to compare with. This phase uses it twice — first to validate the solver, then to score my optimizer against the winner.
  
-**Headline:** my solver reproduces OptiStruct on the winning bracket to 0.00% across 139,330 nodes, and at exactly the winner's mass my optimized design is **1.5–2.3× stiffer in all four load cases**. Its peak stress sits at the yield line rather than clearly under it, which is what the stress constraints in Phase 9 are for.
+**Headline:** my solver reproduces OptiStruct on the winning bracket to 0.00% across 139,330 nodes, and at exactly the winner's mass my optimized design is **1.5–2.3× stiffer in all four load cases**. Its peak stress is not yet proven under yield (see below), which is what the stress constraints in Phase 9 are for.
+ 
+![GE bracket, optimized](images/ge_hero.png)
  
 ### The problem
  
@@ -693,8 +695,6 @@ GE also published the allowed design space, which is simply the original 2 kg br
  
 The optimizer is the Phase 7 pipeline unchanged: four normalized load cases, multigrid solver, PDE filter (rmin = 7.5 mm — three elements, well above GE's 1.27 mm minimum wall), and the same loads used in the validation. The volume fraction is set so the part has **exactly the winner's volume**, 77,102 mm³ (16.6% of the envelope). It converges in 52 iterations (about 23 minutes) to an **arch**: a solid block around the clevis lugs at the crown, with curved legs sweeping down to each pair of bolts and triangular openings between them.
  
-![GE bracket, optimized](images/ge_optimized_smooth.png)
- 
 ### Scoring it like a real part
  
 A density field is not a part. To compare fairly, the result is turned into geometry and re-analyzed the way MIT analyzed the human designs:
@@ -704,6 +704,8 @@ A density field is not a part. To compare fairly, the result is turned into geom
 3. Taubin smoothing (alternating shrink and inflate steps, so the surface smooths without losing volume)
 4. a watertight STL — a printable file: [`ge_smooth.stl`](phase8-ge-benchmark/ge_smooth.stl) (GitHub renders it in 3D)
 5. re-meshed with 411k quality tets (TetGen, ~1 mm) and re-solved with the validated loads and supports
+![From envelope to printable part](images/ge_pipeline.png)
+ 
 | Load case | Mine (N·mm) | Winner (N·mm) | Ratio | Compliance reduction |
 |:---|:---:|:---:|:---:|:---:|
 | Vertical | 20,009 | 38,062 | 0.53 | 47% |
@@ -713,12 +715,23 @@ A density field is not a part. To compare fairly, the result is turned into geom
  
 At 345 g, the same mass as the winner, the optimized bracket is **1.5–2.3× stiffer in every load case**. The ratios on the coarse optimization mesh were slightly better (0.41–0.57); re-meshing finely removed the over-stiffness of coarse linear tets, and the advantage held.
  
-**Stress tells a more careful story.** Measured away from the supports and the pin (more than 3 mm from any interface node — the winner's peaks also all sit in the body of the part), my design's peak von Mises stress is **832 MPa** in the horizontal case. Two runs of the same pipeline on different library versions gave 832 and 940 MPa, at the junction between the lug block and the body. Compliance reproduced to about 1% between those runs; peak stress did not, because a single peak depends on exactly how one fillet was smoothed and meshed. So the honest reading is that the hot spot sits **at the yield line** (903 MPa), roughly level with the winner's 865 MPa, not clearly below it.
+![Winner vs optimized, same mass](images/ge_vs_winner.png)
  
-That is the expected limit of the method: **compliance minimization makes a part stiff, but it never looks at peak stress.** The winner was designed for the opposite goal — minimum mass under a stress limit — which is why it leaves stiffness on the table, and why this design beats it on stiffness but not convincingly on strength. Closing that gap means putting the stress limit into the optimization itself (Phase 9).
+The two designs answer different questions. The winner keeps a broad, plate-like base that spreads material over the whole footprint; the optimized part concentrates the same 345 g into a few direct load paths — a solid block where all four loads enter at the clevis, and legs running straight to the bolts.
+ 
+**Stress tells a more careful story.** Measured away from the supports and the pin (more than 3 mm from any interface node — the winner's peaks also all sit in the body of the part), the peak von Mises stress came out at 832 MPa in one run and 940 MPa in another, both in the horizontal case, against a yield of 903 MPa and the winner's 865 MPa. Compliance reproduced to about 1% between those runs; the peak did not.
+ 
+Zooming in on the peak (in the 940 MPa run) explains why. It sits on the edge of a **1–2 mm pinhole** through a thin wall at the lug–body junction — an artifact of thresholding, where the optimized density dipped just below the cut level. A small hole in a loaded plate concentrates stress roughly threefold, and its exact size and shape change from run to run, which is why the peak moved while compliance didn't. More than 5 mm from that spot, the highest stress in the same load case is about **650 MPa**, roughly 28% under yield; in the other cases the remaining peaks sit at the edge of a bolt seat (up to about 750 MPa), the zone where the rigid-support model is least trustworthy.
+ 
+![Stress, with the pinhole hot spot](images/ge_stress.png)
+ 
+That 650 MPa is a diagnosis, not a result: masking a hot spot is not the same as removing it, and a printed part would keep the pinhole. Two fixes follow. The geometry pipeline should remove sub-millimeter holes and slivers before scoring (a minimum-feature cleanup), and the optimizer itself should be told about stress, so the design never relies on luck at a thin junction. The second is Phase 9.
+ 
+Compliance minimization makes a part stiff, but it never looks at peak stress. The winner was designed for the opposite goal — minimum mass under a stress limit — which is why it leaves stiffness on the table. So the defensible claim today is the stiffness one; beating the winner on GE's own criterion is the Phase 9 target.
  
 ### Honest limitations
  
+- **Geometry cleanup.** Thresholding can leave small pinholes and thin slivers that act as stress concentrators; they should be removed before stress is scored.
 - **Stiffness, not GE's criterion.** The comparison above is at equal mass on compliance. Beating the winner on GE's own terms means a lighter part with a guaranteed margin under yield — the goal of Phase 9.
 - **Support singularities.** The raw peak stress (about 1,900 MPa) sits exactly on the edge of the fully fixed bolt seats. A perfectly rigid support creates a theoretical stress singularity there, which grows with refinement rather than converging, so stress is reported away from the interfaces.
 - **Manufacturability isn't checked.** No overhang constraint in 3D yet, and the 1.27 mm minimum wall is satisfied only because rmin is much larger.
