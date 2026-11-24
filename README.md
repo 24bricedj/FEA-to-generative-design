@@ -43,8 +43,8 @@ The broader thesis is unchanged — build every layer from first principles to u
 | 5 | SIMP topology optimization | Complete |
 | 6 | Manufacturing-constrained generative design (AM overhang, feature size) | Complete |
 | 7 | Arbitrary meshes and 3D topology optimization (Gmsh input, tetrahedra, multigrid, multi-load) | Complete |
-| 8 | GE jet-engine bracket benchmark (validation against OptiStruct and the competition winner) | In progress |
-| 9 | General optimizer (MMA), density filter, stress constraints | Planned |
+| 8 | GE jet-engine bracket benchmark (validation against OptiStruct and the competition winner) | Complete |
+| 9 | General optimizer (MMA), density filter, stress constraints | In progress |
 | 10 | ML acceleration (neural reparameterization / PINN surrogates) | Planned |
  
 ---
@@ -378,264 +378,261 @@ python optimize_fine.py   # 180x60 + von Mises stress (~40 s)
 ```
  
 ---
-
+ 
 ## Phase 6: Manufacturing-Constrained Generative Design
-
+ 
 Phase 5 produces the stiffest structure for a material budget. It does not produce a structure you can *build*. In laser powder-bed fusion, a downward-facing surface angled too shallowly has no solid material beneath it to conduct heat away or support the melt pool, so it sags or fails outright. This phase adds a self-support constraint directly into the optimization, so the design that comes out is printable by construction rather than fixed up afterward.
-
+ 
 ### The 45° rule is geometry, not superstition
-
+ 
 The 45° limit isn't an arbitrary number — it falls out of the element grid. An element on layer n can only be supported by elements on layer n-1, and if every element is a uniform square, the only elements in contact with it are the one directly below, the one below-left, and the one below-right. That reach is one unit down and one unit over, which is exactly 45°. Anything further out — two columns over for one layer up — is 26.6°, too shallow to support itself.
-
+ 
 So the support condition is: element (i, n) is printable if any of (i-1, n-1), (i, n-1), (i+1, n-1) is solid. Three elements, and the 45° rule is enforced by construction rather than imposed as a separate check.
-
+ 
 ### Printability is not local
-
+ 
 Unlike Phase 4, where each element's sensitivity depended only on that element's own displacement and stiffness, printability cannot be evaluated element by element, because **order matters**. Each layer depends on the layer below it, which depends on the layer below that, all the way down. An element's supporters are only actually present if *they* were supported in turn.
-
+ 
 So the constraint has to be built from the build plate upward: evaluate what exists on the plate, use that to determine what can be printed above it, and propagate up layer by layer. Printability is a property of an unbroken support chain, not of an element.
-
+ 
 ### The filter
-
+ 
 Hard logic ("is any of my three supporters solid?") has zero gradient everywhere and is undefined at the switch — useless to a gradient-driven optimizer, for the same reason SIMP uses continuous densities rather than binary ones. Both operations are therefore smoothed:
-
+ 
 ```
 Support factor from the three elements below:
-
+ 
     S = ( a^q + b^q + c^q )^(1/q)          smooth max (q-norm), q = 8
-
+ 
 where a, b, c are the printable densities of the elements below-left,
 directly below, and below-right.
-
+ 
 Printable density:
-
+ 
     rho_hat = smin( rho, S )
-
+ 
     smin(a,b) = ( a + b - sqrt((a-b)^2 + eps) ) / 2
 ```
-
+ 
 **The smooth max.** Raising each supporter to a high power makes the largest one dominate the sum — the same "big values dominate when raised to a power" mechanism as SIMP penalization, used here for a different purpose. Taking the q-th root then recovers that largest value. It is the familiar root-sum-of-squares generalized past q = 2: at q = 2 the smaller values still contribute and the result overshoots the true maximum, but by q = 8 they are crushed to nothing and the approximation is tight.
-
+ 
 **Why min and not a product.** The printable density is capped by two separate things: what the designer asked for, and how much support is available. You get the smaller of the two — that is a minimum, not a product. Using a product instead compounds partial support at every layer: starting from a uniform 0.5 field, the support factor is 0.574, so ρ̂ becomes 0.287, then 0.165 on the next layer, decaying geometrically up the build until the top of the part is annihilated and the stiffness matrix goes singular. The min form has no such decay, because a fully supported column passes ρ through untouched.
-
+ 
 The physics runs on ρ̂ (what can actually be printed), never on the raw design variable ρ.
-
+ 
 ### Chaining the gradient back: a backward sweep
-
+ 
 The optimizer controls ρ, but the physics sees ρ̂, so the sensitivity has to be chained back through the filter.
-
+ 
 Support propagates upward, which means influence does too: nudging one element near the build plate changes the printable density of everything in an upward-widening 45° cone above it. Summing over that cone separately for each design variable would be enormously redundant, since the cones overlap heavily.
-
+ 
 The sweep therefore runs **top-down**, and the direction is forced rather than chosen. Element (i, n) affects the elements above it, so computing its total influence requires already knowing the accumulated influence of everything above. Sweeping from the top means each layer's accumulator is complete by the time the next layer needs it; sweeping from the bottom, you would reach an element without yet knowing what its effects above amount to. Support flows up, so sensitivity flows down.
-
+ 
 One sweep produces the gradient for every design variable. This is the same "reorganize the computation so shared work happens once" insight as the adjoint method in Phase 4 — and structurally it is backpropagation, arrived at from additive manufacturing physics rather than from machine learning.
-
+ 
 ### Validation
-
+ 
 With no analytical reference, the gradient is checked against finite differences on a toy objective, decoupled from the FEA:
-
+ 
 ```
 max relative error:  8.9e-05
 mean relative error: 5.3e-06
 ```
-
+ 
 One finding worth recording: with the smin smoothing set too tight (ε = 1e-8) the finite-difference check failed at roughly 40% error, while the analytical gradient was correct. The function was so nearly kinked that finite differences could not resolve it. Loosening to ε = 1e-4 dropped the error to 1e-4. The check, not the derivation, was the thing that needed fixing.
-
+ 
 ### Results: MBB beam
-
+ 
 | | Unconstrained | AM-constrained (45°) |
 |:---|:---:|:---:|
 | Compliance | 205.8 | 225.2 (**+9.4%**) |
 | Overhang violations | 60 / 2414 solid | 26 / 2419 solid |
 | Greyness | 0.176 | 0.283 |
-
+ 
 ![AM comparison](phase6-AM/am_comparison.png)
-
+ 
 The constrained design restructures visibly: long shallow diagonals are replaced by branching members that trace support back down to the build plate. The ~9% compliance cost sits inside the published range for this benchmark, where reported values run from about 6% to 19% depending on formulation and build orientation.
-
+ 
 ![AM stress comparison](phase6-AM/am_stress.png)
-
+ 
 Colouring both designs by von Mises stress on a shared scale shows where the extra material goes: the AM design's added branches carry almost no load (dark blue). They exist to satisfy printability, not to carry force — the cost of self-support made visible.
-
+ 
 Thresholded to solid/void at comparable volume (0.5029 vs 0.5040), both designs land at essentially the same compliance (189.6 vs 189.4), with peak von Mises of 1419 vs 1392 MPa under a 10 kN load. The near-identical thresholded performance suggests a substantial share of the +9.4% SIMP-level penalty is intermediate-density penalization rather than structural cost — though this is suggestive rather than rigorous, since thresholding is a non-optimal post-process that improved both designs materially.
-
+ 
 The ~1400 MPa peak is a point-load singularity, not a real stress: applying the entire load at a single node produces a theoretically infinite stress that worsens with mesh refinement. The colour scale is capped at the 98th percentile (478 MPa); the median of ~245 MPa is representative.
-
+ 
 ### Multiple load cases
-
+ 
 The objective generalizes to a weighted sum over load cases, `c = Σ w_k c_k`. Because every case shares the same stiffness matrix, the `−p ρ^(p−1)` factor is common to all of them, and the sensitivity becomes an accumulation of weighted strain energy:
-
+ 
 ```
 dc/dρⱼ = −p ρⱼ^(p−1) Σ_k w_k uₖⱼᵀ Kⱼ⁽⁰⁾ uₖⱼ
 ```
-
+ 
 Weighting matters more than it appears. With a vertical and a horizontal load applied at equal weight, the vertical case contributed 206 and the horizontal 3.7 — a 56× imbalance that made the second case effectively invisible to the optimizer. Normalizing by each case's standalone compliance produces a genuinely braced design, at a cost of roughly 14% on the primary load case.
-
+ 
 ### Feature size
-
+ 
 Minimum feature size is enforced by the Phase 5 sensitivity filter radius `rmin`, which imposes a physical length scale independent of the mesh — "no features thinner than rmin" is directly a minimum printable wall thickness. This is inherited from Phase 5 rather than added here; no separate parameter study was run.
-
+ 
 ### Honest limitations
-
+ 
 - **Residual intermediate density.** The AM design is greyer than the unconstrained one (0.283 vs 0.176). This is a documented characteristic of the method: the optimizer exploits the smooth approximations to build regions of constant intermediate density that satisfy the filter without committing to solid material. Heaviside projection is the standard remedy; an attempt here either violated the volume constraint (when the constraint was enforced on ρ while the physics used the projected field) or degraded the design (when enforced correctly on the projected field), and was not pursued further.
 - **No stress constraint.** The objective is compliance, so the optimizer is blind to local stress. Thin members that are efficient load paths but locally overstressed are not penalized — a limitation visible by eye in some results.
 - **Build orientation is fixed.** Printability depends strongly on build direction; published studies show the same MBB problem costing anywhere from 0% to 11% compliance depending on orientation. This implementation prints bottom-up only.
-
 ### Running Phase 6
-
+ 
 ```bash
 cd phase6-AM
 python validate_gradient.py   # adjoint sweep vs finite differences
 python optimize_am.py         # MBB with and without the overhang constraint
 python stress_compare.py      # von Mises comparison
 ```
-
+ 
 ---
-
+ 
 ## Phase 7: Arbitrary Meshes and 3D Topology Optimization
-
+ 
 Phases 1–6 all ran on structured grids I generated myself: rows of identical squares or triangles, with loads and supports placed by node number. A real part doesn't arrive that way. It arrives as CAD, meshed by someone else, with elements of every size, and its loads live on surfaces rather than on numbered nodes. This phase turns the stack into a tool that accepts **any tetrahedral mesh** with named surfaces, optimizes it in 3D, and scales to hundreds of thousands of elements on a laptop. It ends with a bracket carrying four simultaneous load cases at 264,000 elements in about ten minutes.
-
+ 
 ### Meshes from Gmsh, boundary conditions by name
-
+ 
 Geometry is built in [Gmsh](https://gmsh.info), and every surface that matters is tagged as a *physical group*: `"bolt"`, `"pin"`, `"symmetry"`, `"load"`. The solver never needs to know where anything is; it looks the groups up by name. Supports, loads, and locked regions all become "apply this to the nodes or elements of that group", which is what makes the same code work on a beam, a bracket, or a competition part.
-
+ 
 Unstructured meshes break one hidden assumption of Phase 5: that every element is the same size. Two places had to change.
-
+ 
 - **The optimality-criteria update.** The deal ratio becomes Bⱼ = −(∂c/∂ρⱼ) / (λVⱼ): benefit per unit of *material*, not per element. The volume check becomes Σ ρⱼVⱼ against V* · ΣVⱼ.
 - **The filter.** Averaging raw sensitivities over neighbors lets big elements outvote small ones. Filtering the per-unit-volume quantity ρⱼ(∂c/∂ρⱼ)/Vⱼ and scaling back by Vⱼ fixes it.
-
 Validation on the 2D MBB beam, meshed with unstructured triangles:
-
+ 
 | Mesh | Compliance |
 |:---|:---:|
 | Structured grid (Phase 5) | 203.3 |
 | Unstructured, uniform size (2788 triangles) | 202.81 (0.25%) |
 | Unstructured, graded (20× element-area range) | 203.1 |
-
+ 
 The graded mesh is the real test. Without the volume weighting it gives a different design. With it, a 20× spread in element size changes nothing.
-
+ 
 ![2D unstructured MBB](phase7-mesh-input/mbb_result.png)
-
+ 
 ### The linear tetrahedron
-
+ 
 The 3D element is the direct descendant of the Phase 2 constant-strain triangle. Four nodes, three displacements each, so 12 DOFs. Linear shape functions make the strain constant, so the element integral collapses to a single product:
-
+ 
 ```
 k = Bᵀ D B · V          B: 6×12    D: 6×6    V: tet volume
 ```
-
+ 
 The six strains are εx, εy, εz, γxy, γyz, γxz. B is four 6×3 blocks, one per node, built from that node's shape-function gradients (b, c, d). The shape-function coefficients come straight from inverting the 4×4 matrix [1 x y z] of the corner coordinates, and its determinant is 6V. D is the isotropic 3D law: normal and shear strains decouple, normal strains couple through Poisson's ratio, and D becomes singular at ν = 0.5, the incompressible limit.
-
+ 
 Validation is about what the element *must not* do. The 12×12 matrix should have rank 6 and **exactly six zero eigenvalues**: three rigid translations and three rigid rotations, the motions that cost no energy. On a unit tet and on a rotated, scaled, shifted tet:
-
+ 
 ```
 shape (12, 12), symmetric, rank 6, zero eigenvalues: 6
 energy of a rigid z-rotation: ~1e-16
 ```
-
+ 
 As a system-level check, a thin 3D slab of the MBB beam, modeled as a quarter with symmetry planes, reproduces the 2D answer: **c/T = 199.9 against 202.8** (1.4%). The 3D result is slightly stiffer, as it should be: a plane-stress model lets the slab contract freely through its thickness, while the full 3D solid partially restrains that.
-
+ 
 ![3D MBB, thin slab](phase7-mesh-input/mbb3d_result.png)
-
+ 
 ### A real bracket: loads on surfaces, bolts, and locked regions
-
+ 
 The test part is a block bolted down at four corners and loaded through a pin hole at the top. Three new ideas were needed.
-
+ 
 **Loads on surfaces.** A force spread uniformly over a face of many triangles of different sizes is a pressure, p = F / A_face. Each triangle carries p·A_tri, and each of its three nodes gets a third of that. The third comes from integrating a linear shape function over the triangle, the same reason a line segment gives half its load to each end. The pattern runs through every dimension: **l/2 → A/3 → V/4**. Shared nodes collect a share from every triangle they touch, which is the same accumulation as assembling K. A two-triangle hand calculation (areas 3 and 1, F = 8) gives nodal forces of 2, 2.667, 2.667, and 0.667, which the code reproduces exactly.
-
+ 
 **Bolts and pins.** A bolt is modeled as a rigid pin: every node on the hole wall is fixed in all three directions. That's too stiff compared with a real bolt, which bends and lets the hole wall give. By Saint-Venant's principle, though, the error is local, dying out within a hole diameter or two. A pin pulling in direction **d** presses only on the half of the hole facing **d**, so the loaded triangles are the ones with **r · d > 0**, where r runs from the pin axis to the triangle's centroid. One dot product handles up, down, sideways, and every angle in between.
-
+ 
 **Keep and void regions.** Some material is not the optimizer's to decide. A ring around every hole is **keep**, locked at ρ = 1, which also places the design region outside the zone where the rigid-bolt model is wrong. The column above each bolt is **void**, locked at the minimum density, because a bolt needs room for its head and a wrench. Both are enforced inside the OC binary search, not after it, so the volume check sees them at their true values and the budget stays honest. Each lock gets its own `if ... is not None` guard. Without it, `rho[None] = 1.0` silently sets *every* element to 1 in NumPy.
-
+ 
 | Bracket | Compliance |
 |:---|:---:|
 | Bolts in blind holes, pin pulling up | 4.691 |
 | Through-bolts + wrench-clearance void columns | 4.853 (+3.4%) |
-
+ 
 The first design is a four-legged pyramid: straight members from each bolt to the pin, all in tension. The second is forced to grab each bolt from the side, which grows an eyelet around every hole. The 3.4% is the **price of wrench access**. It had to be positive: adding a constraint only removes designs from the allowed set, so the best of what remains can't beat the best of the original.
-
+ 
 ### Making it fast
-
+ 
 The coarse bracket (39k tets) took about 13 minutes. Refining it hit two walls.
-
+ 
 **The direct solver.** `spsolve` factorizes K, and in 3D the fill-in during factorization grows much faster than the matrix itself. Measured on the bracket: 4.2 s at 23.5k DOFs, 44 s at 64.7k DOFs. On a log-log plot that's a slope of **k ≈ 2.3**, which predicts about 280 s per solve at 144k DOFs, or around six hours for one optimization.
-
+ 
 The replacement is **conjugate gradient** preconditioned with **algebraic multigrid** (pyamg). CG never factorizes K; each step just multiplies K by a vector, which costs about N. Multigrid keeps the number of steps small even though void elements are a billion times softer than solid ones (0.001³). Smooth error components that would take a local solver thousands of steps are removed on coarser levels instead. For elasticity, the coarse levels have to be told about the **six rigid-body modes**, the same six zero eigenvalues the tet validation found. Each solve starts from the previous iteration's displacement (a warm start). Same answer as `spsolve` to 5×10⁻¹¹, and 8× faster on the *coarse* mesh. The CG step count stayed around 30–40 as the mesh grew 7×, which is the whole reason multigrid scales.
-
+ 
 **The filter.** The neighbor-list filter compares each element with every element within rmin, and that count grows like (rmin/h)³: 187 neighbors per element at h = 0.12, 1,224 at h = 0.06, about 6.5 GB just to build. The replacement is a **PDE (Helmholtz) filter**:
-
+ 
 ```
 −r² ∇²ρ̃ + ρ̃ = ρ            r = rmin / (2√3)
 ```
-
+ 
 This is the Phase 3 heat-conduction equation with a loss term. The raw density is the heat source, the filtered density is the temperature, and the loss term (like convection off a fin) limits how far each element's influence spreads. The conduction matrix is the Phase 3 element in 3D, k = V·GᵀG, and the whole system is factorized **once** for the entire optimization. It matches the neighbor-list filter at a correlation of 0.9993. One caveat I found: it only behaves as intended when the mesh resolves r (h ≲ r). On the coarse mesh, where r was smaller than an element, it gave 3.4% higher compliance than the neighbor-list filter; one refinement later, only 1.2%.
-
+ 
 | | Before | After |
 |:---|:---:|:---:|
 | 39k tets | ~13 min | **30 s** |
 | 264k tets (7× more elements) | ~6 h of solves, ~6.5 GB filter | **~12 min** on a laptop |
-
+ 
 Optimizations also now stop when the **design** stops moving (max |Δρ| < 0.01), not just the compliance. That ends most runs in 30–40 iterations instead of a fixed 80.
-
+ 
 Keeping rmin fixed while refining gives the same design with smoother surfaces. That's mesh independence from Phase 5, now visible in 3D. Compliance rises slightly with refinement (4.85 → 4.91 → 4.95) because coarse linear tets are too stiff, the same family of error as the shear locking documented in Phase 2. The fine-mesh number is the trustworthy one.
-
+ 
 | 39k tets, direct solver | 264k tets, multigrid + PDE filter |
 |:---:|:---:|
 | ![coarse](images/Bracket_full_coarse_mesh.png) | ![fine](images/Bracket_full_fine_mesh.png) |
-
+ 
 ### Multiple load cases and torsion
-
+ 
 A real bracket sees more than one load. The GE jet-engine bracket challenge specifies four: vertical, horizontal, 42° from vertical, and a torsion. The 3D version uses the Phase 6 weighted sum, with one change that matters a lot:
-
+ 
 ```
 c = Σᵢ wᵢ · cᵢ / cᵢ⁽⁰⁾            cᵢ⁽⁰⁾ = case i's compliance at iteration 0
 ```
-
+ 
 Dividing by each case's starting compliance makes every term begin at exactly 1, so w = 1 really means equal importance. Because compliance is quadratic in the load (c = FᵀK⁻¹F), the load *magnitude* cancels out of cᵢ/cᵢ⁽⁰⁾ entirely. A torque of 5,000 lb·in and one of 1.0 give the same design, and only the weights set importance. All four cases share one K per iteration, so they share one multigrid setup, the iterative version of factorizing once. Four load cases cost barely more than one.
-
+ 
 **Angled loads.** `surface_load` pushes along one axis, so a 42° pull is applied by superposition: T·sin 42° in x plus T·cos 42° in y, both on the half of the hole facing the full pull direction.
-
+ 
 **Torsion.** A smooth pin is a hinge, so it cannot carry torque about its own axis. A torque about a perpendicular axis rotates the pin rigidly, which pushes one end of the hole up and the other down: a **force couple** with zero net force. The rigid rotation makes the bearing load linear along the pin, and setting its moment equal to the applied torque gives
-
+ 
 ```
 q(z) = 12M(z − z_c) / W³ = M(z − z_c) / I,      I = W³/12
 ```
-
+ 
 which is σ = My/I from beam bending, turned sideways. Each half of the couple should push with 1.5M/W = 0.750; the code gives 0.752. On the first attempt, the discrete couple carried a stray net force of about 4% of each half's push on the fine mesh, because the triangles aren't mirror images front to back. One scale factor cannot satisfy two conditions (zero net force *and* moment = M), so each half gets its own, found from a 2×2 linear system. After that the net force is exactly zero.
-
+ 
 | Compliance | Up only | 3 cases | 4 cases (+ torsion) |
 |:---|:---:|:---:|:---:|
 | Up | **4.954** | 5.580 | 5.571 |
 | Horizontal | — | 3.112 | 3.260 |
 | 42° | — | 4.377 | 4.509 |
 | Torsion | — | — | 12.135 |
-
+ 
 Every case improved about 11–13× from its starting value, and none was ignored. "Up" costs about 12.6% when the bracket also has to handle the others. That's unavoidable: the single-load run already found the best possible design for "up", and the multi-load design is just another allowed layout. The 3-case design came out lopsided, and superposition explains it: the 42° load is "up" plus "+x", which *adds* tension in the legs behind the pin and partly *cancels* it in the legs in front. Compliance itself can't tell left from right, since c(−F) = c(F). Torsion then pulled material out along the full length of the pin, building a **torsion box**, because resistance to a couple grows with the cube of the spread.
-
+ 
 ![4 load cases](images/Bracket_full_4loads.png)
-
+ 
 ### Honest limitations
-
+ 
 - **Compliance can't see buckling or stress.** The single-load bracket's legs are all in tension, which is fine. Under the sideways and angled loads, some legs go into compression, and the optimizer made those the *thinner* ones. Slender compression members are exactly where real parts buckle. Stress and buckling constraints need a more general optimizer than OC (MMA, planned).
 - **The sensitivity filter is a heuristic.** It smooths dc, so OC isn't following the exact gradient. On the fine single-load bracket, compliance bottomed out at 4.9456 and crept back up to 4.954 while the design sharpened. A density filter, with the chain rule carried through, gives consistent gradients, which MMA requires.
 - **Rigid supports.** Fixed hole walls are stiffer than real bolts and create stress singularities at their edges. Keep rings keep the design region away from them, but stress values right at a support aren't meaningful.
 - **No overhang constraint in 3D yet.** The Phase 6 printability filter is 2D and layer-by-layer; the 3D designs here aren't checked for self-support.
-
 ### Running Phase 7
-
+ 
 ```bash
 cd phase7-mesh-input
-
+ 
 # 2D, any triangle mesh
 python mesh_mbb.py 0.05             # unstructured MBB -> mbb.msh
 python optimize_mesh.py mbb.msh
-
+ 
 # 3D tetrahedron
 python check_tet.py                 # rank 6, six rigid-body modes
 python mesh_mbb3d.py 0.05           # thin-slab MBB, quarter model
 python optimize3d.py mbb3d.msh
-
+ 
 # bracket: checks on the coarse mesh first
 python check_surface_load.py        # hand calc: 2, 2.667, 2.667, 0.667
 python mesh_bracket3D.py 0.12       # ~39k tets -> bracket.msh
@@ -643,17 +640,136 @@ python optimize_bracket.py bracket.msh          # single load, direct solver
 python check_fast_solve.py bracket.msh          # multigrid vs spsolve
 python check_pde_filter.py bracket.msh          # PDE vs neighbor-list filter
 python check_torsion.py bracket.msh             # pure couple: zero net force, moment M
-
+ 
 # then the fine mesh
 python mesh_bracket3D.py 0.06       # ~264k tets
 python optimize_bracket_fine.py bracket.msh     # single load
 python optimize_bracket_multi.py bracket.msh    # 4 load cases
 ```
-
+ 
 Requires `gmsh`, `meshio`, and `pyamg` (`pip install gmsh meshio pyamg`).
-
+ 
 ---
-
+ 
+## Phase 8: Benchmark — the GE Jet-Engine Bracket Challenge
+ 
+In 2013 GE posted a jet-engine mounting bracket online and challenged anyone to make it lighter. Roughly 700 entries came in; the top designs were printed in titanium and load-tested, and the winner (M Arie Kurniawan) cut the mass by more than 80%. Researchers at MIT later cleaned 381 of the entries and simulated every one under GE's four load cases in Altair OptiStruct, publishing the meshes and full results as the **SimJEB** dataset.
+ 
+That makes it the hardest honest test available for this project: a real aerospace part, real loads, a commercial solver's answers to check against, and a field of human designs to compare with. This phase uses it twice — first to validate the solver, then to score my optimizer against the winner.
+ 
+**Headline:** my solver reproduces OptiStruct on the winning bracket to 0.00% across 139,330 nodes, and at exactly the winner's mass my optimized design is **1.5–2.3× stiffer in all four load cases**. Its peak stress sits at the yield line rather than clearly under it, which is what the stress constraints in Phase 9 are for.
+ 
+### The problem
+ 
+| | |
+|:---|:---|
+| Material | Ti-6Al-4V (E = 113.8 GPa, ν = 0.342), yield 903 MPa (131 ksi) |
+| Supports | four bolts, modeled as rigid (fixed) |
+| Load cases (applied separately, at the clevis pin) | 8,000 lbf vertical · 8,500 lbf horizontal · 9,500 lbf at 42° from vertical · 5,000 lb·in torsion |
+| GE's criterion | lightest design with no yielding in any load case |
+ 
+Under that criterion, the SimJEB data reproduces the competition result: of the 381 designs, 147 stay under yield in all four cases, and the lightest of those is the winner (design 566, 345 g, peak 865 MPa).
+ 
+### Validation against OptiStruct
+ 
+The SimJEB paper doesn't list the load magnitudes or directions, so I recovered them from the published results. Superposition gives a clean test: if the 42° load is GE's 9,500 lbf split into vertical and horizontal parts, the 42° displacements must equal a·(vertical) + b·(horizontal) with a = 9500 cos 42° / 8000 = 0.8825 and b = 9500 sin 42° / 8500 = 0.7478. Using the average pin displacements from the dataset, that combination reproduces the 42° case to three digits in both directions — confirming GE's magnitudes, the direction of the horizontal load, and that the reference model is linear.
+ 
+The interfaces are modeled the way SimJEB modeled them: every bolt-hole node fully fixed, and each pin load shared equally among all pin-hole nodes (an RBE3-style connector). Torsion is spread with the bolt-group formula, fᵢ = M (ẑ × rᵢ) / Σ|rⱼ|² — each node pushes perpendicular to its arm, in proportion to its distance from the center.
+ 
+Running my tetrahedral element and multigrid solver on the winner's own mesh (645,498 tets) and comparing with OptiStruct at **every one of its 139,330 nodes**:
+ 
+| Load case | Max \|u\|, mine | Max \|u\|, OptiStruct | Whole-field difference |
+|:---|:---:|:---:|:---:|
+| Vertical | 1.5040 mm | 1.5040 mm | 0.00% |
+| Horizontal | 1.0642 mm | 1.0642 mm | 0.00% |
+| 42° | 0.7140 mm | 0.7140 mm | 0.00% |
+| Torsion | 0.6185 mm | 0.6195 mm | 1.93% |
+ 
+All four cases solve in about two minutes on a laptop. The three force cases match exactly; the remaining 1.9% on torsion comes from how the moment is distributed over the pin nodes (the exact weighting inside the commercial connector), not from the element or the solver. The winner's compliance from this validated model sets the scores to beat: **38,062 / 22,041 / 18,838 / 8,741 N·mm**.
+ 
+### Optimizing GE's design envelope
+ 
+GE also published the allowed design space, which is simply the original 2 kg bracket. Its geometry (a STEP file, via the open-source Dolfiny project) is meshed in Gmsh at 2.5 mm, about 199k tets. The envelope already excludes the clevis gap and the bolt-head clearance pockets, so no void regions are needed: space that isn't meshed can never receive material. The four bolt bosses and a 4 mm ring around each pin hole are locked solid (keep), so the interfaces survive.
+ 
+The optimizer is the Phase 7 pipeline unchanged: four normalized load cases, multigrid solver, PDE filter (rmin = 7.5 mm — three elements, well above GE's 1.27 mm minimum wall), and the same loads used in the validation. The volume fraction is set so the part has **exactly the winner's volume**, 77,102 mm³ (16.6% of the envelope). It converges in 52 iterations (about 23 minutes) to an **arch**: a solid block around the clevis lugs at the crown, with curved legs sweeping down to each pair of bolts and triangular openings between them.
+ 
+![GE bracket, optimized](images/ge_optimized_smooth.png)
+ 
+### Scoring it like a real part
+ 
+A density field is not a part. To compare fairly, the result is turned into geometry and re-analyzed the way MIT analyzed the human designs:
+ 
+1. density sampled onto a 0.75 mm voxel grid, zero outside the envelope (so the surface always closes)
+2. marching cubes at the iso-level that encloses **exactly 77,102 mm³** — equal mass by construction
+3. Taubin smoothing (alternating shrink and inflate steps, so the surface smooths without losing volume)
+4. a watertight STL — a printable file: [`ge_smooth.stl`](phase8-ge-benchmark/ge_smooth.stl) (GitHub renders it in 3D)
+5. re-meshed with 411k quality tets (TetGen, ~1 mm) and re-solved with the validated loads and supports
+| Load case | Mine (N·mm) | Winner (N·mm) | Ratio | Compliance reduction |
+|:---|:---:|:---:|:---:|:---:|
+| Vertical | 20,009 | 38,062 | 0.53 | 47% |
+| Horizontal | 14,306 | 22,041 | 0.65 | 35% |
+| 42° | 11,569 | 18,838 | 0.61 | 39% |
+| Torsion | 3,883 | 8,741 | 0.44 | 56% |
+ 
+At 345 g, the same mass as the winner, the optimized bracket is **1.5–2.3× stiffer in every load case**. The ratios on the coarse optimization mesh were slightly better (0.41–0.57); re-meshing finely removed the over-stiffness of coarse linear tets, and the advantage held.
+ 
+**Stress tells a more careful story.** Measured away from the supports and the pin (more than 3 mm from any interface node — the winner's peaks also all sit in the body of the part), my design's peak von Mises stress is **832 MPa** in the horizontal case. Two runs of the same pipeline on different library versions gave 832 and 940 MPa, at the junction between the lug block and the body. Compliance reproduced to about 1% between those runs; peak stress did not, because a single peak depends on exactly how one fillet was smoothed and meshed. So the honest reading is that the hot spot sits **at the yield line** (903 MPa), roughly level with the winner's 865 MPa, not clearly below it.
+ 
+That is the expected limit of the method: **compliance minimization makes a part stiff, but it never looks at peak stress.** The winner was designed for the opposite goal — minimum mass under a stress limit — which is why it leaves stiffness on the table, and why this design beats it on stiffness but not convincingly on strength. Closing that gap means putting the stress limit into the optimization itself (Phase 9).
+ 
+### Honest limitations
+ 
+- **Stiffness, not GE's criterion.** The comparison above is at equal mass on compliance. Beating the winner on GE's own terms means a lighter part with a guaranteed margin under yield — the goal of Phase 9.
+- **Support singularities.** The raw peak stress (about 1,900 MPa) sits exactly on the edge of the fully fixed bolt seats. A perfectly rigid support creates a theoretical stress singularity there, which grows with refinement rather than converging, so stress is reported away from the interfaces.
+- **Manufacturability isn't checked.** No overhang constraint in 3D yet, and the 1.27 mm minimum wall is satisfied only because rmin is much larger.
+- **Data licensing.** SimJEB data (ODC-By) and the GE geometry (GrabCAD, non-commercial) are not redistributed here; the scripts expect them in `phase8-ge-benchmark/data/`.
+### Running Phase 8
+ 
+```bash
+cd phase8-ge-benchmark
+# data/: 566.vtk, 566.csv (SimJEB, Harvard Dataverse); ge_bracket_rotated_nonds.step (Dolfiny)
+python validate_566.py        # solver vs OptiStruct on the winning design
+python mesh_ge.py 2.5         # GE envelope -> ge_envelope.msh
+python optimize_ge.py         # 4-case TO at the winner's mass (~25 min)
+python rescore_smooth.py      # smooth STL -> fine re-mesh -> compliance + stress vs the winner
+```
+ 
+Requires `pyvista` and `tetgen` in addition to the Phase 7 packages.
+ 
+---
+ 
+## Phase 9: General Optimizer and Stress Constraints (in progress)
+ 
+The optimality-criteria update from Phase 5 handles exactly one constraint (volume). GE's real question — the lightest part that doesn't yield — needs a stress constraint, so this phase replaces it with the **Method of Moving Asymptotes** (Svanberg, 1987), the general-purpose optimizer used in structural optimization.
+ 
+### MMA
+ 
+A plain tangent-line model of compliance is useless to minimize: it falls forever, so the minimizer jumps as far as it can, into the region where the line is most wrong. MMA instead approximates each function with reciprocal terms, q/(ρ − L) for decreasing functions like compliance and p/(U − ρ) for increasing ones like volume, matched to the true value and slope at the current design. With L = 0 the approximation of a 1/ρ function is exact, which is why this form suits structures. The asymptotes L and U bracket every variable and act as a built-in, per-element move limit: they pull in (×0.7) for elements that oscillate and push out (×1.2) for elements moving steadily.
+ 
+Because the approximation is separable, each element's update is closed-form, ρ = (U + sL)/(1 + s) with s = √(λp/q), and the multiplier λ is found by bisection on the volume — the same structure as OC, which turns out to be a special case of this family.
+ 
+**Validation:** on the 2D MBB beam with identical sensitivities, MMA reaches **c = 202.41 against OC's 202.77** (0.18%) with the same topology.
+ 
+### Density filter
+ 
+MMA takes gradients literally, and the Phase 5 sensitivity filter is a heuristic — its smoothed gradient isn't the derivative of anything, which showed up as elements bouncing at the move limit long after compliance had settled. The density filter instead runs the physics on filtered densities, ρ̃ = Wρ, and chains the gradient back exactly with the transpose, ∂c/∂ρ = Wᵀ ∂c/∂ρ̃ — forward with W, backward with Wᵀ, the same structure as backpropagation. Because the filter is linear, the filtered volume is exactly (WᵀV)·ρ, so MMA needs no changes. A dot-product test, (Wx)·g = x·(Wᵀg) for random vectors, confirms the transpose to machine precision.
+ 
+MMA with the density filter gives c = 212.3 on the same problem — about 5% higher and grayer, a well-documented effect of blurring member edges over the filter radius. It is the consistent-gradient foundation the stress constraint needs.
+ 
+### Next
+ 
+Stress constraints: relaxed element stresses (σ = ρ̃^q σ_solid with q < 1, so gray material can't hide stress), a smooth p-norm aggregate in place of one constraint per element, and an adjoint solve for its gradient, verified against finite differences. Then the GE bracket again, posed as GE posed it: minimum mass subject to peak stress below 903 MPa with a safety factor.
+ 
+### Running Phase 9
+ 
+```bash
+cd phase9-mma
+python check_density_filter.py   # dot-product test for the transpose
+python optimize_mma.py           # OC vs MMA vs MMA + density filter on the MBB beam
+```
+ 
+---
+ 
 ## Tech Stack
  
 - **Python 3.11**
@@ -662,6 +778,7 @@ Requires `gmsh`, `meshio`, and `pyamg` (`pip install gmsh meshio pyamg`).
 - **Matplotlib** -- visualization
 - **Gmsh** + **meshio** -- geometry, meshing, and mesh I/O (Phase 7+)
 - **pyamg** -- algebraic multigrid preconditioning (Phase 7+)
+- **PyVista** + **TetGen** -- isosurfaces, smoothing, and re-meshing for STL export (Phase 8+)
 - **ParaView** -- 3D visualization of results
 (Later phases will add PyTorch and further optimization libraries.)
  
